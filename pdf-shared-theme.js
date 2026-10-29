@@ -1,6 +1,5 @@
 /**
  * Zentrale Design-, Layout- & Komponenten-Bibliothek für eBay & Kleinanzeigen PDF-Export (pdfmake)
- * Maßstab für Typografie & Größen: Kleinanzeigen Chat PDF-Export & eBay Chat PDF-Export
  *
  * Einbindung in beide Tampermonkey-Skripte via:
  * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-shared-theme.js
@@ -116,9 +115,7 @@
         const ctx = getMeasureContext();
         if (!ctx) return String(text || '').length * (fontSizePt * 0.52);
         ctx.font = `${isBold ? 'bold ' : ''}${fontSizePt}px Roboto, Arial, sans-serif`;
-        const lines = String(text || '').split(/
-?
-/);
+        const lines = String(text || '').split(/\r?\n/);
         let maxW = 0;
         for (const line of lines) {
             const w = ctx.measureText(line).width;
@@ -673,9 +670,6 @@
         return { bubbleNode, bubbleWidthPt, isOwn };
     }
 
-    /**
-     * Requirement 8: Tag-Überschrift (z.B. "01. Jan. 2026")
-     */
     function buildDateSeparatorNode(dateText) {
         return {
             text: cleanTextPreserveEmojis(dateText),
@@ -698,12 +692,6 @@
         };
     }
 
-    /**
-     * Requirement 1, 3, 5, 6:
-     * - Nutzericon links unten von der einzelnen Chat Bubble (untere Grenze bündig mit Chat Bubble)
-     * - Zeitstempel <dd.mm.yyyy, hh:mm> (Requirement 6)
-     * - Links beim Partner mit Avatar, rechts bei mir
-     */
     function buildChatMessageRow(msg, options = {}) {
         const platform = options.platform || 'auto';
         const { bubbleNode, bubbleWidthPt, isOwn } = buildChatBubbleNode(msg, platform);
@@ -772,9 +760,6 @@
         };
     }
 
-    /**
-     * Requirement 4: Dreifacher Geviertstrich (Three-em dash): ⸻ (U+2E3B) &#11835;
-     */
     function buildEndOfChatNode(text = '⸻ Ende des Nachrichtenverlaufs ⸻') {
         return {
             text: cleanTextPreserveEmojis(text),
