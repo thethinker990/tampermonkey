@@ -1,9 +1,9 @@
 /**
  * Zentrale Design-, Layout- & Komponenten-Bibliothek für eBay & Kleinanzeigen PDF-Export (pdfmake)
- * Maßstab für Typografie & Größen: Kleinanzeigen Chat PDF-Export v2.6.5
+ * Maßstab für Typografie & Größen: Kleinanzeigen Chat PDF-Export & eBay Chat PDF-Export
  *
  * Einbindung in beide Tampermonkey-Skripte via:
- * // @require https://raw.githubusercontent.com/<DEIN-USER>/<DEIN-REPO>/main/pdf-shared-theme.js
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-shared-theme.js
  */
 (function (global) {
     'use strict';
@@ -13,7 +13,7 @@
             size: 'A4',
             orientation: 'portrait',
             margins: [28, 28, 28, 38],
-            contentWidthPt: 539, // A4 (595.28pt) - 2 * 28pt
+            contentWidthPt: 539,
             defaultFontSize: 9.5,
             defaultLineHeight: 1.25
         },
@@ -25,15 +25,15 @@
                 sectionHeaderColor: '#1d4b00',
                 bubble: {
                     outboundFill: '#b5e941',
-                    outboundBorder: '',
+                    outboundBorder: null,
                     outboundText: '#1d4b00',
-                    inboundFill: '#f1efec',
-                    inboundBorder: '',
+                    inboundFill: '#f4f2ef',
+                    inboundBorder: '#d5d7da',
                     inboundText: '#1a1a1a',
                     offerBoxOwnFill: '#a4dc34',
                     offerBoxPartnerFill: '#ffffff',
                     offerBoxBorder: '#9dc730',
-                    sharpCornerOnSendersSide: true // 3 Ecken rund, 1 Ecke spitz
+                    sharpCornerOnSendersSide: false
                 }
             },
             ebay: {
@@ -43,15 +43,15 @@
                 sectionHeaderColor: '#111827',
                 bubble: {
                     outboundFill: '#f3f4f6',
-                    outboundBorder: '#d1d5db',
+                    outboundBorder: null,
                     outboundText: '#111827',
                     inboundFill: '#ffffff',
-                    inboundBorder: '#d1d5db',
+                    inboundBorder: '#d5d7da',
                     inboundText: '#111827',
                     offerBoxOwnFill: '#ffffff',
                     offerBoxPartnerFill: '#f9fafb',
-                    offerBoxBorder: '#d1d5db',
-                    sharpCornerOnSendersSide: false // Alle 4 Ecken rund
+                    offerBoxBorder: '#d5d7da',
+                    sharpCornerOnSendersSide: false
                 }
             }
         },
@@ -75,13 +75,13 @@
         },
         typography: {
             titleHeaderSize: 13,
-            sectionHeaderSize: 12,     // v2.6.5 Standard (12pt bold)
-            tableFontSize: 9.5,        // v2.6.5 Standard (9.5pt)
-            bodyFontSize: 9.5,         // v2.6.5 Standard (9.5pt)
-            exportTimestampSize: 8.5,  // v2.6.5 Standard (8.5pt bold)
-            dateSeparatorSize: 9,
-            messageTimestampSize: 8,   // v2.6.5 Standard (8pt)
-            endOfChatSize: 9,
+            sectionHeaderSize: 12,
+            tableFontSize: 9.5,
+            bodyFontSize: 9.5,
+            exportTimestampSize: 8.5,
+            dateSeparatorSize: 9.5,
+            messageTimestampSize: 8,
+            endOfChatSize: 10,
             footerFontSize: 9,
             galleryCaptionSize: 8.5
         },
@@ -98,13 +98,9 @@
             columnGapPt: 14,
             canvasTargetWidthPx: 980,
             canvasTargetHeightPx: 800,
-            cropMode: 'contain' // 'contain' = vollständiges Bild im einheitlichen Rahmen | 'cover' = Format-Zuschnitt
+            cropMode: 'contain'
         }
     });
-
-    /* ==========================================================================
-     * INTERNE TEXTMESSUNG & PLATTFORM-ERKENNUNG
-     * ========================================================================== */
 
     let measureCtx = null;
 
@@ -120,7 +116,9 @@
         const ctx = getMeasureContext();
         if (!ctx) return String(text || '').length * (fontSizePt * 0.52);
         ctx.font = `${isBold ? 'bold ' : ''}${fontSizePt}px Roboto, Arial, sans-serif`;
-        const lines = String(text || '').split(/\r?\n/);
+        const lines = String(text || '').split(/
+?
+/);
         let maxW = 0;
         for (const line of lines) {
             const w = ctx.measureText(line).width;
@@ -172,10 +170,14 @@
         return Math.max(1, totalLines);
     }
 
-    /**
-     * Erkennt die Plattform entweder anhand des übergebenen Parameters ('ebay' | 'kleinanzeigen')
-     * oder automatisch anhand von window.location.hostname.
-     */
+    function cleanTextPreserveEmojis(str) {
+        if (!str) return '';
+        return String(str)
+            .replace(/\u00a0/g, ' ')
+            .replace(/[ \t]+/g, ' ')
+            .trim();
+    }
+
     function resolvePlatform(platformParam) {
         if (platformParam && typeof platformParam === 'string') {
             const p = platformParam.toLowerCase().trim();
@@ -195,19 +197,10 @@
         return TOKENS.themes[key] || TOKENS.themes.kleinanzeigen;
     }
 
-    /* ==========================================================================
-     * 1. TITELZEILE (GRÜN / BLAU, VERTIKAL ZENTRIERT)
-     * ========================================================================== */
-
-    /**
-     * Erzeugt den farbigen Titel-Header (Grün für Kleinanzeigen, Blau für eBay).
-     * Vertikal zentriert durch lineHeight: 1.05 und kompensiertes Top-/Bottom-Padding.
-     */
     function buildTitleBar(titleText, platform = 'auto', options = {}) {
         const theme = getTheme(platform);
         const fontSize = TOKENS.typography.titleHeaderSize;
         const lineHeight = 1.08;
-        // Kompensiert den minimalen unteren lineHeight-Überhang, damit Text exakt mittig sitzt
         const padTop = 6;
         const padBottom = 5;
 
@@ -217,7 +210,7 @@
                 body: [
                     [
                         {
-                            text: String(titleText || 'Unbekannter Artikel'),
+                            text: cleanTextPreserveEmojis(titleText || 'Unbekannter Artikel'),
                             bold: true,
                             fontSize,
                             lineHeight,
@@ -248,12 +241,9 @@
         return node;
     }
 
-    /* ==========================================================================
-     * 2. METADATEN-TABELLEN (9.5pt, VERTIKAL ZENTRIERT) & LINKS
-     * ========================================================================== */
-
     function buildLinkCell(labelValue, url, carrierPrefix = '') {
-        if (!labelValue || labelValue === 'n/a') {
+        const cleanVal = cleanTextPreserveEmojis(labelValue);
+        if (!cleanVal || cleanVal === 'n/a') {
             if (url) {
                 return {
                     text: [
@@ -266,12 +256,12 @@
             return 'n/a';
         }
         if (!url) {
-            return carrierPrefix ? `${labelValue} (${carrierPrefix})` : labelValue;
+            return carrierPrefix ? `${cleanVal} (${carrierPrefix})` : cleanVal;
         }
         const prefix = carrierPrefix ? `${carrierPrefix} ` : '';
         return {
             text: [
-                `${labelValue} (${prefix}`,
+                `${prefix}${cleanVal} (`,
                 { text: 'Link', link: url, color: TOKENS.colors.link, decoration: 'underline' },
                 ')'
             ]
@@ -280,24 +270,19 @@
 
     function buildTotalAmountCell(amountText) {
         return {
-            text: amountText || 'n/a',
+            text: cleanTextPreserveEmojis(amountText || 'n/a'),
             bold: true,
             fontSize: TOKENS.typography.tableFontSize,
             color: TOKENS.colors.textPrimary
         };
     }
 
-    /**
-     * Erzeugt eine 2-spaltige Metadaten- oder Merkmal-Tabelle im Kleinanzeigen-v2.6.5-Stil (9.5pt).
-     * Zentriert alle Zellen vertikal (auch in pdfmake 0.2.10 bei mehrzeiligen Werten).
-     */
     function buildMetaTable(rows, labelWidth = TOKENS.table.defaultLabelWidth, totalTableWidth = TOKENS.page.contentWidthPt) {
         const fontSize = TOKENS.typography.tableFontSize;
         const lineHeight = TOKENS.table.cellLineHeight;
         const padX = TOKENS.table.padX;
         const basePadY = TOKENS.table.padY;
 
-        // In pdfmake fügt lineHeight (z.B. 1.15) am unteren Ende jeder Zeile (fontSize * 1.17 * 0.15) an.
         const trailingLineGapPt = +(fontSize * 1.17 * (lineHeight - 1)).toFixed(2);
         const singleLineHeightPt = +(fontSize * 1.17 * lineHeight).toFixed(2);
 
@@ -316,7 +301,6 @@
             const labelExtraHalf = +(((maxLines - labelLines) * singleLineHeightPt) / 2).toFixed(2);
             const valExtraHalf = +(((maxLines - valLines) * singleLineHeightPt) / 2).toFixed(2);
 
-            // Top-Margin erhält +trailingLineGapPt/2, Bottom-Margin -trailingLineGapPt/2 für exakte optische Mitte
             const labelTop = +(basePadY + labelExtraHalf + trailingLineGapPt * 0.45).toFixed(2);
             const labelBottom = Math.max(1, +(basePadY + labelExtraHalf - trailingLineGapPt * 0.55).toFixed(2));
 
@@ -324,7 +308,7 @@
             const valBottom = Math.max(1, +(basePadY + valExtraHalf - trailingLineGapPt * 0.55).toFixed(2));
 
             const labelCell = {
-                text: label,
+                text: cleanTextPreserveEmojis(label),
                 bold: true,
                 fontSize,
                 lineHeight,
@@ -336,7 +320,7 @@
             const valueCell =
                 typeof val === 'string'
                     ? {
-                          text: val,
+                          text: cleanTextPreserveEmojis(val),
                           fontSize,
                           lineHeight,
                           color: TOKENS.colors.textPrimary,
@@ -376,10 +360,6 @@
         };
     }
 
-    /* ==========================================================================
-     * 3. EXPORT-ZEITSTEMPEL, ZWISCHENHEADER & BESCHREIBUNGS-BOX
-     * ========================================================================== */
-
     function formatExportTimestamp(date = new Date()) {
         const dd = String(date.getDate()).padStart(2, '0');
         const mm = String(date.getMonth() + 1).padStart(2, '0');
@@ -397,9 +377,6 @@
         return `${dd}.${mm}.${yyyy} ${hh}:${min}:${sec} ${tzShort} (${tzIana})`.trim();
     }
 
-    /**
-     * "Exportiert / Erstellt am: 28.10.2026 12:05:41 MEZ (Europe/Berlin)" im v2.6.5-Stil (8.5pt, fett, #374151)
-     */
     function buildExportedAtNode(exportedAtStr, label = 'Exportiert / Erstellt am:') {
         const ts = exportedAtStr || formatExportTimestamp();
         return {
@@ -412,13 +389,10 @@
         };
     }
 
-    /**
-     * Zwischenheader wie "Artikelmerkmale", "Beschreibung", "Bilder (2)" (v2.6.5: 12pt, bold)
-     */
     function buildSectionHeader(titleText, platform = 'auto', options = {}) {
         const theme = getTheme(platform);
         return {
-            text: titleText,
+            text: cleanTextPreserveEmojis(titleText),
             fontSize: TOKENS.typography.sectionHeaderSize,
             bold: true,
             color: options.color || theme.sectionHeaderColor || TOKENS.colors.textDark,
@@ -428,9 +402,6 @@
         };
     }
 
-    /**
-     * Beschreibungs-Block inkl. Zwischenheader "Beschreibung" und grauer Rahmenbox/Tabelle (wie in KA v2.6.5)
-     */
     function buildDescriptionBlock(descriptionText, platform = 'auto') {
         if (!descriptionText || !String(descriptionText).trim()) return [];
         return [
@@ -441,7 +412,7 @@
                     body: [
                         [
                             {
-                                text: String(descriptionText).trim(),
+                                text: cleanTextPreserveEmojis(descriptionText),
                                 fontSize: TOKENS.typography.bodyFontSize,
                                 lineHeight: TOKENS.page.defaultLineHeight,
                                 color: TOKENS.colors.textDesc,
@@ -465,10 +436,6 @@
             }
         ];
     }
-
-    /* ==========================================================================
-     * 4. VEKTOR-KARTEN & PLATTFORMSPEZIFISCHE CHAT-BUBBLES (KA vs. EBAY)
-     * ========================================================================== */
 
     function buildRoundedTopCapSvg(widthPt, radiusPt, fillColor, strokeColor = '') {
         const w = Math.max(40, Math.round(widthPt));
@@ -512,9 +479,6 @@
         return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><path d="${dFill}" fill="${fillColor}"/>${strokeTag}</svg>`;
     }
 
-    /**
-     * Erzeugt eine abgerundete Vektor-Karte / Sprechblase (wahlweise 4 Ecken rund oder 3 Ecken rund + 1 spitze Ecke).
-     */
     function buildRoundedCardPdfNode({
         widthPt,
         radiusPt = 9,
@@ -579,17 +543,12 @@
         };
     }
 
-    /**
-     * Baut eine einzelne Chat-Sprechblase:
-     * - Kleinanzeigen: Grün (#b5e941) / Grau (#f1efec), kein Rahmen, 3 Ecken gerundet + 1 Ecke unten spitz.
-     * - eBay: Hellgrau (#f3f4f6) / Weiß (#ffffff), grauer Rahmen (#d1d5db), alle 4 Ecken gerundet.
-     */
     function buildChatBubbleNode(msg, platform = 'auto') {
         const theme = getTheme(platform);
         const bTheme = theme.bubble;
         const isOwn = Boolean(msg.isOwn || msg.type === 'OUTBOUND');
 
-        const MAX_BUBBLE_WIDTH_PT = Math.round(TOKENS.page.contentWidthPt * 0.62); // ~334pt
+        const MAX_BUBBLE_WIDTH_PT = Math.round(TOKENS.page.contentWidthPt * 0.62);
         const MIN_BUBBLE_WIDTH_PT = 78;
         const padX = 9;
 
@@ -603,7 +562,6 @@
         const bubbleStack = [];
         let longestContentPt = 0;
 
-        // 1. Optionaler Preisvorschlag (eBay Offer-Box)
         if (msg.offer) {
             const offerTitleW = measureTextWidthPt(msg.offer.title || 'Preisvorschlag', 9.5, true);
             const offerAmountW = measureTextWidthPt(msg.offer.amount || '', 11, true);
@@ -617,13 +575,13 @@
                             {
                                 stack: [
                                     {
-                                        text: msg.offer.title || 'Preisvorschlag',
+                                        text: cleanTextPreserveEmojis(msg.offer.title || 'Preisvorschlag'),
                                         bold: true,
                                         fontSize: 9.5,
                                         color: '#111111'
                                     },
                                     {
-                                        text: msg.offer.amount || '',
+                                        text: cleanTextPreserveEmojis(msg.offer.amount || ''),
                                         bold: true,
                                         fontSize: 11,
                                         color: '#111111',
@@ -646,7 +604,6 @@
             });
         }
 
-        // 2. Optionale Bilder in der Nachricht (unterstützt KA msg.photos & eBay msg.images)
         const attachments = Array.isArray(msg.photos)
             ? msg.photos
             : Array.isArray(msg.images)
@@ -671,7 +628,7 @@
                 });
                 if (labelText) {
                     bubbleStack.push({
-                        text: labelText,
+                        text: cleanTextPreserveEmojis(labelText),
                         fontSize: 7.5,
                         italics: true,
                         color: TOKENS.colors.textMuted,
@@ -681,12 +638,11 @@
             }
         }
 
-        // 3. Nachrichtentext
         if (msg.text) {
             const textW = measureTextWidthPt(msg.text, TOKENS.typography.bodyFontSize, false);
             longestContentPt = Math.max(longestContentPt, textW);
             bubbleStack.push({
-                text: String(msg.text),
+                text: cleanTextPreserveEmojis(msg.text),
                 fontSize: TOKENS.typography.bodyFontSize,
                 lineHeight: TOKENS.page.defaultLineHeight,
                 color: textColor
@@ -707,7 +663,7 @@
             widthPt: bubbleWidthPt,
             radiusPt: 9,
             fillColor,
-            strokeColor,
+            strokeColor: strokeColor || '',
             roundBottomLeft,
             roundBottomRight,
             padX,
@@ -717,30 +673,24 @@
         return { bubbleNode, bubbleWidthPt, isOwn };
     }
 
-    /* ==========================================================================
-     * 5. SYSTEMNACHRICHTEN, DATUMSTRENNER & ZEITSTEMPEL UNTER NACHRICHTEN
-     * ========================================================================== */
-
     /**
-     * Zentrierter Datumstrenner im Chatverlauf (z.B. "26.10.2026" oder "26. Okt. 2026")
+     * Requirement 8: Tag-Überschrift (z.B. "01. Jan. 2026")
      */
     function buildDateSeparatorNode(dateText) {
         return {
-            text: String(dateText || ''),
+            text: cleanTextPreserveEmojis(dateText),
             alignment: 'center',
             fontSize: TOKENS.typography.dateSeparatorSize,
+            bold: true,
             color: TOKENS.colors.textMuted,
-            margin: [0, 8, 0, 8]
+            margin: [0, 10, 0, 6],
+            unbreakable: true
         };
     }
 
-    /**
-     * Kleiner grauer Subtext direkt unter einer Sprechblase oder Systemkarte
-     * (z.B. "26.10.2026, 14:22" oder "Automatische Nachricht")
-     */
     function buildMessageSubtextNode(text, isRightAligned = false, customMargin = null) {
         return {
-            text: String(text || ''),
+            text: cleanTextPreserveEmojis(text),
             fontSize: TOKENS.typography.messageTimestampSize,
             color: TOKENS.colors.textTimestamp,
             alignment: isRightAligned ? 'right' : 'left',
@@ -749,8 +699,10 @@
     }
 
     /**
-     * Baut eine komplette Chat-Nachrichtenzeile (inkl. Avatar links bei Partner-Nachrichten,
-     * Sprechblase, optionaler Warnung und Datum/Uhrzeit unter der Nachricht).
+     * Requirement 1, 3, 5, 6:
+     * - Nutzericon links unten von der einzelnen Chat Bubble (untere Grenze bündig mit Chat Bubble)
+     * - Zeitstempel <dd.mm.yyyy, hh:mm> (Requirement 6)
+     * - Links beim Partner mit Avatar, rechts bei mir
      */
     function buildChatMessageRow(msg, options = {}) {
         const platform = options.platform || 'auto';
@@ -759,7 +711,7 @@
 
         if (msg.warningText) {
             stack.push({
-                text: `⚠️ ${msg.warningText}`,
+                text: cleanTextPreserveEmojis(`⚠️ ${msg.warningText}`),
                 fontSize: 8,
                 bold: true,
                 color: TOKENS.colors.textWarning,
@@ -791,15 +743,15 @@
         if (options.avatarSvg) {
             avatarCol = {
                 width: AVATAR_COL_WIDTH_PT,
-                stack: [{ svg: options.avatarSvg, width: 26, margin: [0, 2, 6, 0] }]
+                stack: [{ svg: options.avatarSvg, width: 26, margin: [0, 0, 6, 0] }]
             };
         } else if (options.avatarDataUrl) {
             avatarCol = {
                 width: AVATAR_COL_WIDTH_PT,
                 image: options.avatarDataUrl,
-                fit: [24, 24],
+                fit: [26, 26],
                 alignment: 'left',
-                margin: [0, 2, 6, 0]
+                margin: [0, 0, 6, 0]
             };
         }
 
@@ -820,26 +772,20 @@
         };
     }
 
-    /* ==========================================================================
-     * 6. ENDE DES NACHRICHTENVERLAUFS & SEITENZÄHLER (FOOTER)
-     * ========================================================================== */
-
     /**
-     * Einheitlicher Abschluss-Text unter dem Chatverlauf für beide Plattformen
+     * Requirement 4: Dreifacher Geviertstrich (Three-em dash): ⸻ (U+2E3B) &#11835;
      */
-    function buildEndOfChatNode(text = '--- Ende des Nachrichtenverlaufs ---') {
+    function buildEndOfChatNode(text = '⸻ Ende des Nachrichtenverlaufs ⸻') {
         return {
-            text,
+            text: cleanTextPreserveEmojis(text),
             alignment: 'center',
             fontSize: TOKENS.typography.endOfChatSize,
+            bold: true,
             color: TOKENS.colors.textMuted,
             margin: [0, 14, 0, 14]
         };
     }
 
-    /**
-     * Einheitlicher Seitenzähler im Footer ("1/5")
-     */
     function buildPageFooter() {
         return (currentPage, pageCount) => ({
             text: `${currentPage}/${pageCount}`,
@@ -850,14 +796,6 @@
         });
     }
 
-    /* ==========================================================================
-     * 7. 2-SPALTEN-BILDERGALERIE ("Bilder (2)", ZÄHLER "1/2" & ZUSCHNITT)
-     * ========================================================================== */
-
-    /**
-     * Normiert Galeriebilder vorab auf ein identisches Seitenverhältnis,
-     * damit alle Bilder im PDF exakt gleich groß dargestellt werden.
-     */
     function normalizeGalleryImageDataUrl(sourceDataUrl, mode = TOKENS.gallery.cropMode) {
         return new Promise((resolve) => {
             if (!sourceDataUrl) {
@@ -902,9 +840,6 @@
         });
     }
 
-    /**
-     * Baut die 2-spaltige Bildergalerie inkl. Zwischenheader "Bilder (n)" und Zähler "1/2"
-     */
     function buildTwoColumnGallery(images, platform = 'auto', sectionTitlePrefix = 'Bilder') {
         if (!Array.isArray(images) || images.length === 0) return [];
         const total = images.length;
@@ -958,6 +893,7 @@
         resolvePlatform,
         getTheme,
         measureTextWidthPt,
+        cleanTextPreserveEmojis,
         buildTitleBar,
         buildLinkCell,
         buildTotalAmountCell,
