@@ -977,3 +977,5 @@
         buildTwoColumnGallery
     });
 })(typeof window !== 'undefined' ? window : globalThis);
+
+window.PdfSharedTheme = PdfSharedTheme;
