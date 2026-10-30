@@ -1,6 +1,6 @@
 /**
  * Zentrale Design-, Layout- & Komponenten-Bibliothek für eBay & Kleinanzeigen PDF-Export (pdfmake)
- * Version: 2.0.0
+ * Version: 2.1.0
  *
  * Einbindung in beide Tampermonkey-Skripte via:
  * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-shared-theme.js
@@ -235,22 +235,27 @@
      * DYNAMISCHE TRUETYPE-SCHRIFT (ChatEmoji) FÜR EMOJIS & THREE-EM DASH (U+2E3B)
      * ========================================================================== */
 
-    const EMOJI_OR_SPECIAL_CP_REGEX = /[\u2E3B\u2600-\u27BF\u{1F000}-\u{1FAFF}]/u;
+    const EMOJI_OR_SPECIAL_CP_REGEX = /[\u203C\u2049\u2122\u2139\u2194-\u21AA\u2300-\u23FF\u24C2\u25AA-\u27BF\u2934-\u2935\u2B00-\u2BFF\u2E3B\u3030\u303D\u3297\u3299\u{1F000}-\u{1FAFF}]/u;
     const registeredCodepoints = new Set([0x2E3B]);
 
     function isSpecialOrEmojiCodepoint(cp) {
         if (!cp) return false;
         if (cp === 0x2E3B) return true;
-        if (cp >= 0x2600 && cp <= 0x27BF) return true;
+        if (cp === 0x203C || cp === 0x2049 || cp === 0x2122 || cp === 0x2139) return true;
+        if (cp >= 0x2194 && cp <= 0x21AA) return true;
         if (cp >= 0x2300 && cp <= 0x23FF) return true;
+        if (cp === 0x24C2) return true;
+        if (cp >= 0x25AA && cp <= 0x27BF) return true;
+        if (cp >= 0x2934 && cp <= 0x2935) return true;
         if (cp >= 0x2B00 && cp <= 0x2BFF) return true;
+        if (cp === 0x3030 || cp === 0x303D || cp === 0x3297 || cp === 0x3299) return true;
         if (cp >= 0x1F000 && cp <= 0x1FAFF) return true;
         return false;
     }
 
     function collectSpecialCodepointsFromText(str) {
         if (!str || typeof str !== 'string') return;
-        const cleaned = str.replace(/\uFE0F/g, '');
+        const cleaned = str.replace(/[\uFE0E\uFE0F\u200D]/g, '');
         for (const ch of cleaned) {
             const cp = ch.codePointAt(0);
             if (isSpecialOrEmojiCodepoint(cp)) {
@@ -633,9 +638,9 @@
         const cleaned = cleanTextPreserveEmojis(rawStr);
         if (!cleaned) return '';
 
-        const withoutVS16 = cleaned.replace(/\uFE0F/g, '');
+        const withoutVS16 = cleaned.replace(/[\uFE0E\uFE0F\u200D]/g, '');
         if (!EMOJI_OR_SPECIAL_CP_REGEX.test(withoutVS16)) {
-            return cleaned;
+            return withoutVS16;
         }
 
         collectSpecialCodepointsFromText(withoutVS16);
@@ -739,7 +744,7 @@
             }
         }
 
-        const timeMatch = /\b([01]?\d|2[0-3]):([0-5]\d)\b/.exec(String(rawInput || ''));
+        const timeMatch = /\b([01]?\d|2[0-3]):([0-5]\d)\b/.exec(combined);
         const hh = timeMatch ? String(timeMatch[1]).padStart(2, '0') : null;
         const min = timeMatch ? String(timeMatch[2]).padStart(2, '0') : null;
 
