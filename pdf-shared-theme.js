@@ -1,6 +1,6 @@
 /**
  * Zentrale Design-, Layout- & Komponenten-Bibliothek für eBay & Kleinanzeigen PDF-Export (pdfmake)
- * Version: 2.1.0
+ * Version: 2.2.0
  *
  * Einbindung in beide Tampermonkey-Skripte via:
  * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-shared-theme.js
@@ -14,6 +14,35 @@
         'Jan.', 'Feb.', 'Mär.', 'Apr.', 'Mai.', 'Jun.',
         'Jul.', 'Aug.', 'Sep.', 'Okt.', 'Nov.', 'Dez.'
     ]);
+
+    /**
+     * Einheitliche Feldbezeichnungen (ohne Doppelpunkt!) für Kleinanzeigen & eBay
+     */
+    const META_LABELS = Object.freeze({
+        SOURCE: 'Quelle',
+        CREATED_WITH: 'Erstellt mit',
+        AD_ID: 'Anzeigen-ID',
+        CONV_ID: 'Nachrichten-ID',
+        AD_TYPE: 'Anzeigentyp',
+        CATEGORY: 'Kategorie',
+        BUYER_NAME: 'Käufername',
+        SELLER_NAME: 'Verkäufername',
+        SELLER_ID: 'Verkäufer Nutzer-ID',
+        SELLER_TYPE: 'Verkäufer-Typ',
+        SELLER_SINCE: 'Aktiv seit',
+        LOCATION: 'Ort',
+        CREATED_DATE: 'Eingestellt am',
+        LISTED_PRICE: 'Preis (Anzeige)',
+        LISTED_SHIPPING: 'Versand (Anzeige)',
+        LISTED_TOTAL: 'Gesamtbetrag (Anzeige)',
+        AGREED_PRICE: 'Preis',
+        BUYER_PROTECTION: 'Käuferschutz-Gebühr',
+        AGREED_SHIPPING: 'Versand',
+        TOTAL_AMOUNT: 'Gesamtbetrag',
+        PAYMENT_METHOD: 'Zahlungsart',
+        TRACKING_ID: 'Sendungsverfolgungsnummer',
+        EXPORTED_AT: 'Exportiert / Erstellt am'
+    });
 
     const TOKENS = Object.freeze({
         page: {
@@ -93,7 +122,7 @@
             galleryCaptionSize: 8.5
         },
         table: {
-            defaultLabelWidth: 145,
+            defaultLabelWidth: 155,
             padX: 4,
             padY: 3.5,
             borderWidth: 0.5,
@@ -175,6 +204,29 @@
         return Math.max(1, totalLines);
     }
 
+    /**
+     * Entfernt abschließende Doppelpunkte aus jedem Tabellen-Label (Anforderung: Doppelpunkt überall weg).
+     */
+    function stripTrailingColon(labelStr) {
+        if (labelStr === null || labelStr === undefined) return '';
+        return String(labelStr).replace(/\s*:\s*$/, '').trim();
+    }
+
+    /**
+     * Ersetzt alle €-Symbole durch "EUR" und bereinigt ",00 EUR" zu glatten "EUR"-Beträgen.
+     */
+    function normalizeCurrencyToEUR(rawStr) {
+        if (rawStr === null || rawStr === undefined) return 'n/a';
+        const s = String(rawStr).trim();
+        if (!s || s === 'n/a') return 'n/a';
+        return s
+            .replace(/€/g, 'EUR')
+            .replace(/\bEUR\s*(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?)\b/gi, '$1 EUR')
+            .replace(/\b(\d{1,6})[,.]00(\s*EUR)\b/g, '$1$2')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
     function cleanTextPreserveEmojis(str) {
         if (str === null || str === undefined) return '';
         return String(str)
@@ -232,143 +284,29 @@
     }
 
     /* ==========================================================================
-     * DYNAMISCHE TRUETYPE-SCHRIFT (ChatEmoji) FÜR EMOJIS & THREE-EM DASH (U+2E3B)
+     * FARBIGE EMOJIS (PNG-DATA-URL / SVG) & THREE-EM DASH (U+2E3B) FÜR PDFMAKE
      * ========================================================================== */
 
-    const EMOJI_OR_SPECIAL_CP_REGEX = /[\u203C\u2049\u2122\u2139\u2194-\u21AA\u2300-\u23FF\u24C2\u25AA-\u27BF\u2934-\u2935\u2B00-\u2BFF\u2E3B\u3030\u303D\u3297\u3299\u{1F000}-\u{1FAFF}]/u;
+    const EMOJI_TOKEN_REGEX = /(\u2E3B|(?:[\u2700-\u27BF]|(?:\uD83C[\uDDE6-\uDDFF]){2}|[\uD83C-\uDBFF][\uDC00-\uDFFF]|[\u2600-\u26FF\u2300-\u23FF\u2B50\u2B55\u203C\u2049\u2122\u2139\u2194-\u21AA\u2934-\u2935\u3030\u303D\u3297\u3299])(?:\uFE0F)?(?:\uD83C[\uDFFB-\uDFFF])?(?:\u200D(?:[\u2700-\u27BF]|[\uD83C-\uDBFF][\uDC00-\uDFFF]|[\u2600-\u26FF\u2300-\u23FF])(?:\uFE0F)?(?:\uD83C[\uDFFB-\uDFFF])?)*)/g;
+
     const registeredCodepoints = new Set([0x2E3B]);
 
-    function isSpecialOrEmojiCodepoint(cp) {
-        if (!cp) return false;
-        if (cp === 0x2E3B) return true;
-        if (cp === 0x203C || cp === 0x2049 || cp === 0x2122 || cp === 0x2139) return true;
-        if (cp >= 0x2194 && cp <= 0x21AA) return true;
-        if (cp >= 0x2300 && cp <= 0x23FF) return true;
-        if (cp === 0x24C2) return true;
-        if (cp >= 0x25AA && cp <= 0x27BF) return true;
-        if (cp >= 0x2934 && cp <= 0x2935) return true;
-        if (cp >= 0x2B00 && cp <= 0x2BFF) return true;
-        if (cp === 0x3030 || cp === 0x303D || cp === 0x3297 || cp === 0x3299) return true;
-        if (cp >= 0x1F000 && cp <= 0x1FAFF) return true;
-        return false;
-    }
-
-    function collectSpecialCodepointsFromText(str) {
-        if (!str || typeof str !== 'string') return;
-        const cleaned = str.replace(/[\uFE0E\uFE0F\u200D]/g, '');
-        for (const ch of cleaned) {
-            const cp = ch.codePointAt(0);
-            if (isSpecialOrEmojiCodepoint(cp)) {
-                registeredCodepoints.add(cp);
-            }
-        }
-    }
-
-    function rasterizeCharToGlyphRects(charStr, gridSize = 28) {
-        if (typeof document === 'undefined') {
-            return { advanceWidth: 1000, rects: [[100, 100, 900, 700]] };
-        }
-        const canvas = document.createElement('canvas');
-        canvas.width = gridSize;
-        canvas.height = gridSize;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-            return { advanceWidth: 1000, rects: [[100, 100, 900, 700]] };
-        }
-
-        ctx.clearRect(0, 0, gridSize, gridSize);
-        ctx.fillStyle = '#000000';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.font = `${Math.round(gridSize * 0.82)}px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", "Twemoji Mozilla", sans-serif`;
-        ctx.fillText(charStr, gridSize / 2, gridSize / 2 + 1);
-
-        const imgData = ctx.getImageData(0, 0, gridSize, gridSize).data;
-        const rects = [];
-        const scale = Math.round(920 / gridSize);
-        const yOffset = -100;
-
-        for (let row = 0; row < gridSize; row++) {
-            let runStart = -1;
-            for (let col = 0; col <= gridSize; col++) {
-                let isOpaque = false;
-                if (col < gridSize) {
-                    const idx = (row * gridSize + col) * 4;
-                    const r = imgData[idx];
-                    const g = imgData[idx + 1];
-                    const b = imgData[idx + 2];
-                    const a = imgData[idx + 3];
-                    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-                    isOpaque = a > 75 && lum < 235;
-                }
-                if (isOpaque && runStart === -1) {
-                    runStart = col;
-                } else if (!isOpaque && runStart !== -1) {
-                    const x1 = 40 + runStart * scale;
-                    const x2 = 40 + col * scale;
-                    const yBottom = yOffset + (gridSize - 1 - row) * scale;
-                    const yTop = yBottom + scale;
-                    rects.push([x1, yBottom, x2, yTop]);
-                    runStart = -1;
-                }
-            }
-        }
-
-        if (rects.length === 0) {
-            rects.push([150, 80, 850, 680]);
-        }
-        return { advanceWidth: 1040, rects };
-    }
-
-    function buildDynamicChatEmojiTtfBase64(codepointsIterable) {
-        const sortedCps = Array.from(new Set(codepointsIterable)).sort((a, b) => a - b);
+    function buildThreeEmDashFontBase64() {
         const glyphs = [
-            { advanceWidth: 600, rects: [[60, 0, 540, 700]] }
+            { advanceWidth: 600, rects: [[60, 0, 540, 700]] },
+            { advanceWidth: 2600, rects: [[40, 250, 2560, 335]] }
         ];
-        const cpToGid = new Map();
-
-        for (const cp of sortedCps) {
-            const gid = glyphs.length;
-            cpToGid.set(cp, gid);
-            if (cp === 0x2E3B) {
-                glyphs.push({
-                    advanceWidth: 2600,
-                    rects: [[40, 250, 2560, 335]]
-                });
-            } else {
-                const ch = String.fromCodePoint(cp);
-                glyphs.push(rasterizeCharToGlyphRects(ch, 28));
-            }
-        }
-
+        const sortedCps = [0x2E3B];
+        const cpToGid = new Map([[0x2E3B, 1]]);
         const numGlyphs = glyphs.length;
         const glyfParts = [];
         const locaOffsets = [0];
-        let maxPoints = 4;
-        let maxContours = 1;
 
         for (const g of glyphs) {
-            const rects = g.rects || [];
-            if (rects.length === 0) {
-                locaOffsets.push(locaOffsets[locaOffsets.length - 1]);
-                continue;
-            }
+            const rects = g.rects;
             const numContours = rects.length;
             const numPts = numContours * 4;
-            if (numContours > maxContours) maxContours = numContours;
-            if (numPts > maxPoints) maxPoints = numPts;
-
-            let xMin = 32767;
-            let yMin = 32767;
-            let xMax = -32768;
-            let yMax = -32768;
-            for (const [x1, y1, x2, y2] of rects) {
-                if (x1 < xMin) xMin = x1;
-                if (x2 > xMax) xMax = x2;
-                if (y1 < yMin) yMin = y1;
-                if (y2 > yMax) yMax = y2;
-            }
-
+            const [x1, y1, x2, y2] = rects[0];
             const rawLen = 10 + numContours * 2 + 2 + numPts + numPts * 2 + numPts * 2;
             const paddedLen = (rawLen + 3) & ~3;
             const buf = new ArrayBuffer(paddedLen);
@@ -376,43 +314,23 @@
             let pos = 0;
 
             dv.setInt16(pos, numContours, false); pos += 2;
-            dv.setInt16(pos, xMin, false); pos += 2;
-            dv.setInt16(pos, yMin, false); pos += 2;
-            dv.setInt16(pos, xMax, false); pos += 2;
-            dv.setInt16(pos, yMax, false); pos += 2;
-
-            for (let i = 0; i < numContours; i++) {
-                dv.setUint16(pos, i * 4 + 3, false);
-                pos += 2;
-            }
-            dv.setUint16(pos, 0, false);
-            pos += 2;
-
+            dv.setInt16(pos, x1, false); pos += 2;
+            dv.setInt16(pos, y1, false); pos += 2;
+            dv.setInt16(pos, x2, false); pos += 2;
+            dv.setInt16(pos, y2, false); pos += 2;
+            dv.setUint16(pos, 3, false); pos += 2;
+            dv.setUint16(pos, 0, false); pos += 2;
             for (let i = 0; i < numPts; i++) {
-                dv.setUint8(pos, 0x01);
-                pos += 1;
+                dv.setUint8(pos, 0x01); pos += 1;
             }
-
             let prevX = 0;
-            for (const [x1, y1, x2, y2] of rects) {
-                const xs = [x1, x1, x2, x2];
-                for (const px of xs) {
-                    dv.setInt16(pos, px - prevX, false);
-                    pos += 2;
-                    prevX = px;
-                }
+            for (const px of [x1, x1, x2, x2]) {
+                dv.setInt16(pos, px - prevX, false); pos += 2; prevX = px;
             }
-
             let prevY = 0;
-            for (const [x1, y1, x2, y2] of rects) {
-                const ys = [y1, y2, y2, y1];
-                for (const py of ys) {
-                    dv.setInt16(pos, py - prevY, false);
-                    pos += 2;
-                    prevY = py;
-                }
+            for (const py of [y1, y2, y2, y1]) {
+                dv.setInt16(pos, py - prevY, false); pos += 2; prevY = py;
             }
-
             glyfParts.push(new Uint8Array(buf));
             locaOffsets.push(locaOffsets[locaOffsets.length - 1] + paddedLen);
         }
@@ -458,8 +376,8 @@
         const maxpDv = new DataView(maxpTable.buffer);
         maxpDv.setUint32(0, 0x00010000, false);
         maxpDv.setUint16(4, numGlyphs, false);
-        maxpDv.setUint16(6, maxPoints, false);
-        maxpDv.setUint16(8, maxContours, false);
+        maxpDv.setUint16(6, 4, false);
+        maxpDv.setUint16(8, 1, false);
         maxpDv.setUint16(14, 2, false);
 
         const hmtxTable = new Uint8Array(numGlyphs * 4);
@@ -515,12 +433,7 @@
         };
         const famBytes = encodeUtf16Be('ChatEmoji');
         const subBytes = encodeUtf16Be('Regular');
-        const nameRecs = [
-            [1, famBytes],
-            [2, subBytes],
-            [4, famBytes],
-            [6, famBytes]
-        ];
+        const nameRecs = [[1, famBytes], [2, subBytes], [4, famBytes], [6, famBytes]];
         const strTotal = nameRecs.reduce((acc, r) => acc + r[1].length, 0);
         const nameHeaderLen = 6 + nameRecs.length * 12;
         const nameTable = new Uint8Array(nameHeaderLen + strTotal);
@@ -546,24 +459,15 @@
         postDv.setUint32(0, 0x00030000, false);
 
         const tables = [
-            ['OS/2', os2Table],
-            ['cmap', cmapTable],
-            ['glyf', glyfTable],
-            ['head', headTable],
-            ['hhea', hheaTable],
-            ['hmtx', hmtxTable],
-            ['loca', locaTable],
-            ['maxp', maxpTable],
-            ['name', nameTable],
-            ['post', postTable]
+            ['OS/2', os2Table], ['cmap', cmapTable], ['glyf', glyfTable],
+            ['head', headTable], ['hhea', hheaTable], ['hmtx', hmtxTable],
+            ['loca', locaTable], ['maxp', maxpTable], ['name', nameTable], ['post', postTable]
         ];
 
         const numTables = tables.length;
         const dirSize = 12 + numTables * 16;
         let totalSize = dirSize;
-        for (const [, data] of tables) {
-            totalSize += (data.length + 3) & ~3;
-        }
+        for (const [, data] of tables) totalSize += (data.length + 3) & ~3;
 
         const ttf = new Uint8Array(totalSize);
         const ttfDv = new DataView(ttf.buffer);
@@ -577,16 +481,12 @@
         tables.forEach(([tag, data], idx) => {
             const paddedLen = (data.length + 3) & ~3;
             ttf.set(data, dataOffset);
-
             let csum = 0;
             for (let p = 0; p < paddedLen; p += 4) {
                 csum = (csum + ttfDv.getUint32(dataOffset + p, false)) >>> 0;
             }
-
             const entryBase = 12 + idx * 16;
-            for (let c = 0; c < 4; c++) {
-                ttf[entryBase + c] = tag.charCodeAt(c);
-            }
+            for (let c = 0; c < 4; c++) ttf[entryBase + c] = tag.charCodeAt(c);
             ttfDv.setUint32(entryBase + 4, csum, false);
             ttfDv.setUint32(entryBase + 8, dataOffset, false);
             ttfDv.setUint32(entryBase + 12, data.length, false);
@@ -594,9 +494,7 @@
         });
 
         let binary = '';
-        for (let i = 0; i < ttf.length; i++) {
-            binary += String.fromCharCode(ttf[i]);
-        }
+        for (let i = 0; i < ttf.length; i++) binary += String.fromCharCode(ttf[i]);
         return btoa(binary);
     }
 
@@ -605,7 +503,7 @@
         if (!pdfMake) return false;
 
         try {
-            const b64 = buildDynamicChatEmojiTtfBase64(registeredCodepoints);
+            const b64 = buildThreeEmDashFontBase64();
             pdfMake.vfs = pdfMake.vfs || {};
             pdfMake.vfs['ChatEmoji-Regular.ttf'] = b64;
             pdfMake.fonts = pdfMake.fonts || {};
@@ -625,58 +523,241 @@
             };
             return true;
         } catch (err) {
-            console.warn('[PdfSharedTheme] Emoji-Font-Registrierung fehlgeschlagen:', err);
+            console.warn('[PdfSharedTheme] Font-Registrierung fehlgeschlagen:', err);
             return false;
         }
     }
 
     /**
-     * Zerlegt einen String mit Emojis oder ⸻ (U+2E3B) in ein pdfmake-Text-Inline-Array,
-     * sodass Emojis und ⸻ automatisch mit der eingebetteten Schriftart 'ChatEmoji' gerendert werden.
+     * Zeichnet ein beliebiges Farb-Emoji (wie 👍, 😊, 🎉) samt Text-Run direkt als hochauflösendes
+     * transparentes Farb-PNG auf einem <canvas>, falls eine Zeile echte Farb-Emojis enthält.
+     * Dadurch erscheinen Emojis im PDF in 100% Originalfarbe (gelb/bunt) statt als schwarze Klötzchen!
+     */
+    function renderColorEmojiTextLineToPngDataUrl(textStr, options = {}) {
+        if (typeof document === 'undefined') return null;
+        const fontSizePt = options.fontSize || TOKENS.typography.bodyFontSize;
+        const textColor = options.color || '#111827';
+        const isBold = Boolean(options.bold);
+        const maxWidthPt = options.maxWidthPt || 310;
+
+        const scale = 3.2;
+        const fontPx = fontSizePt * scale;
+        const lineHeightPx = fontPx * (options.lineHeight || 1.28);
+        const maxWidthPx = maxWidthPt * scale;
+
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return null;
+
+        const fontSpec = `${isBold ? 'bold ' : ''}${fontPx}px Roboto, Arial, "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif`;
+        ctx.font = fontSpec;
+
+        const paragraphs = String(textStr || '').split(/\r?\n/);
+        const wrappedLines = [];
+
+        for (const para of paragraphs) {
+            if (!para.trim()) {
+                wrappedLines.push('');
+                continue;
+            }
+            const words = para.split(/[ \t]+/);
+            let currentLine = '';
+            for (const word of words) {
+                const candidate = currentLine ? `${currentLine} ${word}` : word;
+                if (ctx.measureText(candidate).width <= maxWidthPx) {
+                    currentLine = candidate;
+                } else {
+                    if (currentLine) wrappedLines.push(currentLine);
+                    currentLine = word;
+                }
+            }
+            if (currentLine) wrappedLines.push(currentLine);
+        }
+
+        if (wrappedLines.length === 0) wrappedLines.push('');
+
+        let actualMaxW = 40;
+        for (const l of wrappedLines) {
+            const w = ctx.measureText(l).width;
+            if (w > actualMaxW) actualMaxW = w;
+        }
+
+        const padTopPx = Math.ceil(fontPx * 0.25);
+        const padBottomPx = Math.ceil(fontPx * 0.28);
+        const canvasW = Math.min(Math.ceil(maxWidthPx + 8), Math.ceil(actualMaxW + 8));
+        const canvasH = Math.ceil(wrappedLines.length * lineHeightPx + padTopPx + padBottomPx);
+
+        canvas.width = Math.max(16, canvasW);
+        canvas.height = Math.max(16, canvasH);
+
+        const drawCtx = canvas.getContext('2d');
+        if (!drawCtx) return null;
+        drawCtx.clearRect(0, 0, canvas.width, canvas.height);
+        drawCtx.font = fontSpec;
+        drawCtx.fillStyle = textColor;
+        drawCtx.textBaseline = 'top';
+
+        wrappedLines.forEach((line, idx) => {
+            drawCtx.fillText(line, 1, padTopPx + idx * lineHeightPx);
+        });
+
+        return {
+            dataUrl: canvas.toDataURL('image/png'),
+            widthPt: +(canvas.width / scale).toFixed(2),
+            heightPt: +(canvas.height / scale).toFixed(2)
+        };
+    }
+
+    function hasColorEmoji(str) {
+        if (!str || typeof str !== 'string') return false;
+        const withoutThreeEm = str.replace(/\u2E3B/g, '');
+        EMOJI_TOKEN_REGEX.lastIndex = 0;
+        return EMOJI_TOKEN_REGEX.test(withoutThreeEm);
+    }
+
+    /**
+     * Zerlegt einen String mit ⸻ (U+2E3B) in ein pdfmake-Text-Inline-Array.
      */
     function buildRichTextWithEmojis(rawStr) {
         const cleaned = cleanTextPreserveEmojis(rawStr);
         if (!cleaned) return '';
 
-        const withoutVS16 = cleaned.replace(/[\uFE0E\uFE0F\u200D]/g, '');
-        if (!EMOJI_OR_SPECIAL_CP_REGEX.test(withoutVS16)) {
-            return withoutVS16;
+        if (!cleaned.includes('\u2E3B')) {
+            return cleaned;
         }
 
-        collectSpecialCodepointsFromText(withoutVS16);
         ensurePdfMakeEmojiFontRegistered();
 
+        const parts = cleaned.split(/(\u2E3B+)/);
         const runs = [];
-        let currentText = '';
-        let currentIsSpecial = false;
-
-        for (const ch of withoutVS16) {
-            const cp = ch.codePointAt(0);
-            const isSpec = isSpecialOrEmojiCodepoint(cp);
-            if (currentText === '') {
-                currentText = ch;
-                currentIsSpecial = isSpec;
-            } else if (isSpec === currentIsSpecial) {
-                currentText += ch;
+        for (const p of parts) {
+            if (!p) continue;
+            if (/^\u2E3B+$/.test(p)) {
+                runs.push({ text: p, font: 'ChatEmoji' });
             } else {
-                runs.push(
-                    currentIsSpecial
-                        ? { text: currentText, font: 'ChatEmoji' }
-                        : currentText
-                );
-                currentText = ch;
-                currentIsSpecial = isSpec;
+                runs.push(p);
             }
         }
-        if (currentText !== '') {
-            runs.push(
-                currentIsSpecial
-                    ? { text: currentText, font: 'ChatEmoji' }
-                    : currentText
-            );
+        return runs.length === 1 ? runs[0] : runs;
+    }
+
+    /**
+     * Erzeugt einen Text- oder Farb-Emoji-Block für Nachrichten und Beschreibungen:
+     * Wenn ein Absatz Farb-Emojis (z. B. 👍, 😊) enthält, wird dieser mit der nativen Farb-Emoji-Engine
+     * des Browsers als gestochen scharfes, transparentes Farb-PNG gerendert, sodass keine schwarzen
+     * Monochrom-Emojis entstehen. Reine Textzeilen bleiben 100% durchsuchbarer Vektortext.
+     */
+    function buildParagraphNodeWithColorEmojis(rawText, options = {}) {
+        const cleaned = String(rawText || '').replace(/\r\n/g, '\n').trim();
+        if (!cleaned) return { text: '' };
+
+        const fontSize = options.fontSize || TOKENS.typography.bodyFontSize;
+        const lineHeight = options.lineHeight || TOKENS.page.defaultLineHeight;
+        const color = options.color || TOKENS.colors.textPrimary;
+        const bold = Boolean(options.bold);
+        const maxWidthPt = options.maxWidthPt || 310;
+
+        if (!hasColorEmoji(cleaned)) {
+            return {
+                text: buildRichTextWithEmojis(cleaned),
+                fontSize,
+                lineHeight,
+                color,
+                bold
+            };
         }
 
-        return runs.length === 1 ? runs[0] : runs;
+        const lines = cleaned.split('\n');
+        const stackNodes = [];
+
+        for (const line of lines) {
+            if (!line.trim()) {
+                stackNodes.push({ text: ' ', fontSize: Math.round(fontSize * 0.6) });
+                continue;
+            }
+            if (hasColorEmoji(line)) {
+                const rendered = renderColorEmojiTextLineToPngDataUrl(line, {
+                    fontSize,
+                    lineHeight,
+                    color,
+                    bold,
+                    maxWidthPt
+                });
+                if (rendered && rendered.dataUrl) {
+                    stackNodes.push({
+                        image: rendered.dataUrl,
+                        width: rendered.widthPt,
+                        margin: [0, 1, 0, 1]
+                    });
+                    continue;
+                }
+            }
+            stackNodes.push({
+                text: buildRichTextWithEmojis(line),
+                fontSize,
+                lineHeight,
+                color,
+                bold
+            });
+        }
+
+        return stackNodes.length === 1 ? stackNodes[0] : { stack: stackNodes };
+    }
+
+    /* ==========================================================================
+     * KLEINANZEIGEN-BRAND-LOGO (ALS HOCHAUFLÖSENDES PNG STATT FEHLERHAFTEM SVG)
+     * ========================================================================== */
+
+    let cachedKaBrandPngDataUrl = null;
+
+    /**
+     * Erzeugt das Kleinanzeigen-Logo + Schriftzug als gestochen scharfes PNG-DataURL (via Canvas),
+     * damit pdfmake beim SVG-Parsing weder Pfad-Artefakte noch Schrift-Verschiebungen produziert.
+     */
+    function buildKleinanzeigenBrandImageDataUrl() {
+        if (cachedKaBrandPngDataUrl) return cachedKaBrandPngDataUrl;
+        if (typeof document === 'undefined') return '';
+
+        const scale = 3;
+        const w = 138;
+        const h = 24;
+        const canvas = document.createElement('canvas');
+        canvas.width = w * scale;
+        canvas.height = h * scale;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return '';
+
+        ctx.scale(scale, scale);
+        ctx.clearRect(0, 0, w, h);
+
+        // Grünes Pin-/Schleifen-Emblem links
+        ctx.save();
+        ctx.fillStyle = '#b5e941';
+        ctx.beginPath();
+        ctx.arc(11, 12, 9.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = '#1d4b00';
+        ctx.lineWidth = 2.1;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(8, 6.5);
+        ctx.lineTo(8, 17.5);
+        ctx.moveTo(14.5, 7.5);
+        ctx.lineTo(8.5, 12.2);
+        ctx.lineTo(15, 17);
+        ctx.stroke();
+        ctx.restore();
+
+        // Wortmarke "kleinanzeigen"
+        ctx.fillStyle = '#1d4b00';
+        ctx.font = 'bold 15.5px Roboto, Arial, sans-serif';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('kleinanzeigen', 25, 12.5);
+
+        cachedKaBrandPngDataUrl = canvas.toDataURL('image/png');
+        return cachedKaBrandPngDataUrl;
     }
 
     /* ==========================================================================
@@ -710,7 +791,7 @@
         }
 
         if (day === null) {
-            const namedMonthMatch = /\b(\d{1,2})\.\s*([A-Za-zÄÖÜäöü]{3,})\.?\s*(\d{4})?\b/.exec(combined);
+            const namedMonthMatch = /\b(\d{1,2})\.?\s*([A-Za-zÄÖÜäöü]{3,})\.?\s*(\d{4})?\b/.exec(combined);
             if (namedMonthMatch) {
                 const token = namedMonthMatch[2].toLowerCase().slice(0, 3);
                 const monthMap = {
@@ -775,8 +856,37 @@
     }
 
     /**
-     * Formatiert einen Nachrichten-Zeitstempel einheitlich nach "<dd.mm.yyyy, hh:mm>" (bzw. "<dd.mm.yyyy>", falls keine Uhrzeit existiert).
+     * Formatiert ein Datum + relative Altersangabe ("09.12.2014 (vor 11 Jahren)" bzw. "28.10.2026 (vor 2 Tagen)").
      */
+    function formatDateWithRelativeAge(rawDateStr, mode = 'days') {
+        if (!rawDateStr || rawDateStr === 'n/a') return 'n/a';
+        const parsed = parseAnyDateParts(rawDateStr);
+        if (!parsed || !parsed.hasDate) return String(rawDateStr).trim();
+
+        const target = new Date(parsed.year, parsed.monthIndex, parsed.day, 0, 0, 0, 0);
+        const now = new Date();
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+        const diffDays = Math.max(0, Math.floor((today.getTime() - target.getTime()) / 86400000));
+
+        let label = '';
+        if (mode === 'activeSince') {
+            if (diffDays > 365) {
+                const years = Math.max(1, Math.floor(diffDays / 365));
+                label = years === 1 ? 'vor 1 Jahr' : `vor ${years} Jahren`;
+            } else if (diffDays >= 30) {
+                const months = Math.max(1, Math.floor(diffDays / 30));
+                label = months === 1 ? 'vor 1 Monat' : `vor ${months} Monaten`;
+            } else {
+                label = diffDays === 1 ? 'vor 1 Tag' : `vor ${diffDays} Tagen`;
+            }
+        } else {
+            label = diffDays === 1 ? 'vor 1 Tag' : `vor ${diffDays} Tagen`;
+        }
+
+        const timeSuffix = parsed.hh !== null && parsed.min !== null ? `, ${parsed.hh}:${parsed.min}` : '';
+        return `${parsed.numericDate}${timeSuffix} (${label})`;
+    }
+
     function normalizeMessageTimestamp(rawTimestamp, fallbackDateStr = '') {
         if (!rawTimestamp && !fallbackDateStr) return '';
         const raw = String(rawTimestamp || '')
@@ -799,9 +909,6 @@
         return cleanTextPreserveEmojis(raw);
     }
 
-    /**
-     * Erzeugt die Tagesüberschrift im Format "<dd. mmm. yyyy>" (z. B. "01. Jan. 2026").
-     */
     function formatDateGroupLabel(rawDateOrTimestamp, fallbackDateStr = '') {
         const parsed = parseAnyDateParts(rawDateOrTimestamp, fallbackDateStr);
         if (parsed && parsed.hasDate) {
@@ -902,31 +1009,48 @@
 
     function buildTotalAmountCell(amountText) {
         return {
-            text: cleanTextPreserveEmojis(amountText || 'n/a'),
+            text: normalizeCurrencyToEUR(amountText || 'n/a'),
             bold: true,
             fontSize: TOKENS.typography.tableFontSize,
             color: TOKENS.colors.textPrimary
         };
     }
 
+    /**
+     * Baut eine Metadaten-Tabelle:
+     * - Entfernt automatisch jeden Doppelpunkt am Ende der linken Spalte.
+     * - Berechnet die Spaltenbreite der linken Spalte so, dass selbst lange Wörter wie
+     *   "Sendungsverfolgungsnummer" garantiert in 1 Zeile passen (kein Umbruch auf 2 Zeilen!).
+     */
     function buildMetaTable(rows, labelWidth = TOKENS.table.defaultLabelWidth, totalTableWidth = TOKENS.page.contentWidthPt) {
         const fontSize = TOKENS.typography.tableFontSize;
         const lineHeight = TOKENS.table.cellLineHeight;
         const padX = TOKENS.table.padX;
         const basePadY = TOKENS.table.padY;
 
+        // Dynamische Mindestbreite für das längste Label (damit "Sendungsverfolgungsnummer" niemals umbricht)
+        let longestLabelPt = labelWidth;
+        for (const [rawLabel] of rows) {
+            const cleanLbl = stripTrailingColon(extractPlainTextFromCell(rawLabel));
+            const measured = Math.ceil(measureTextWidthPt(cleanLbl, fontSize, true) + padX * 2 + 8);
+            if (measured > longestLabelPt) {
+                longestLabelPt = measured;
+            }
+        }
+        const effectiveLabelWidth = Math.min(Math.round(totalTableWidth * 0.48), Math.max(labelWidth, longestLabelPt));
+
         const trailingLineGapPt = +(fontSize * 1.17 * (lineHeight - 1)).toFixed(2);
         const singleLineHeightPt = +(fontSize * 1.17 * lineHeight).toFixed(2);
 
-        const availLabelW = Math.max(30, labelWidth - padX * 2);
-        const availValueW = Math.max(50, totalTableWidth - labelWidth - padX * 2);
+        const availLabelW = Math.max(30, effectiveLabelWidth - padX * 2);
+        const availValueW = Math.max(50, totalTableWidth - effectiveLabelWidth - padX * 2);
 
-        const body = rows.map(([label, val]) => {
-            const labelStr = extractPlainTextFromCell(label);
+        const body = rows.map(([rawLabel, val]) => {
+            const cleanLabelStr = stripTrailingColon(extractPlainTextFromCell(rawLabel));
             const valStr = extractPlainTextFromCell(val);
             const isValBold = Boolean(val && typeof val === 'object' && val.bold);
 
-            const labelLines = estimateWrappedLineCount(labelStr, availLabelW, fontSize, true);
+            const labelLines = estimateWrappedLineCount(cleanLabelStr, availLabelW, fontSize, true);
             const valLines = estimateWrappedLineCount(valStr, availValueW, fontSize, isValBold);
             const maxLines = Math.max(labelLines, valLines);
 
@@ -940,7 +1064,7 @@
             const valBottom = Math.max(1, +(basePadY + valExtraHalf - trailingLineGapPt * 0.55).toFixed(2));
 
             const labelCell = {
-                text: buildRichTextWithEmojis(label),
+                text: buildRichTextWithEmojis(cleanLabelStr),
                 bold: true,
                 fontSize,
                 lineHeight,
@@ -965,7 +1089,7 @@
                           color: TOKENS.colors.textPrimary,
                           verticalAlignment: 'middle',
                           ...val,
-                          margin: [padX, valTop, padX, valBottom]
+                          margin: [padX, valTop, valBottom ? padX : padX, valBottom]
                       };
 
             return [labelCell, valueCell];
@@ -974,7 +1098,7 @@
         return {
             fontSize,
             table: {
-                widths: [labelWidth, '*'],
+                widths: [effectiveLabelWidth, '*'],
                 body
             },
             layout: {
@@ -989,6 +1113,146 @@
                 paddingTop: () => 0,
                 paddingBottom: () => 0
             }
+        };
+    }
+
+    /**
+     * Zentrale Funktion für die Chat-Metadaten-Sektion (Seite 1) mit identischer Sortierung & Struktur
+     * für Kleinanzeigen und eBay:
+     * 1. Haupttabelle (Quelle, Erstellt mit, Anzeigen-ID, Nachrichten-ID, Anzeigentyp, Käufername, Verkäufername)
+     *    -> OHNE Anzeigentitel (da dieser bereits oben in der Titelbar steht!)
+     * 2. Nebeneinander: Links (Preis (Anzeige), Versand (Anzeige), Gesamtbetrag (Anzeige)) & Rechts (Preis, Versand, [Käuferschutz-Gebühr], Gesamtbetrag)
+     * 3. Untere Tabelle: [Zahlungsart nur bei Kleinanzeigen], Sendungsverfolgungsnummer
+     * 4. Exportiert / Erstellt am (ohne Doppelpunkt)
+     */
+    function buildUnifiedChatMetaSection(data, options = {}) {
+        const platform = resolvePlatform(options.platform || data.platform || data.website);
+        const isEbay = platform === 'ebay';
+
+        const topRows = [
+            [META_LABELS.SOURCE, data.website || data.platformLabel || 'n/a'],
+            [META_LABELS.CREATED_WITH, data.scriptVersion || data.createdBy || 'n/a'],
+            [META_LABELS.AD_ID, buildLinkCell(data.adId || 'n/a', data.adUrl || '')],
+            [META_LABELS.CONV_ID, buildLinkCell(data.conversationId || data.msgId || 'n/a', data.conversationUrl || data.msgUrl || '')],
+            [META_LABELS.AD_TYPE, data.adType || 'n/a'],
+            [META_LABELS.BUYER_NAME, buildLinkCell(data.buyerName || 'n/a', data.buyerUrl || '')],
+            [META_LABELS.SELLER_NAME, buildLinkCell(data.sellerName || 'n/a', data.sellerUrl || '')]
+        ];
+
+        const listedPrice = normalizeCurrencyToEUR(data.listedPrice || data.adPrice || 'n/a');
+        const listedShipping = normalizeCurrencyToEUR(data.listedShipping || data.adShipping || 'n/a');
+        const listedTotal = normalizeCurrencyToEUR(data.listedTotalAmount || data.adTotalAmount || 'n/a');
+
+        const agreedPrice = normalizeCurrencyToEUR(data.articlePrice || data.agreedPrice || 'n/a');
+        const agreedShipping = normalizeCurrencyToEUR(data.agreedShipping || data.shippingCost || 'n/a');
+        const buyerProtection = normalizeCurrencyToEUR(data.buyerProtectionFee || 'n/a');
+        const totalAmount = normalizeCurrencyToEUR(data.totalAmount || 'n/a');
+
+        const leftPriceRows = [
+            [META_LABELS.LISTED_PRICE, listedPrice],
+            [META_LABELS.LISTED_SHIPPING, listedShipping],
+            [META_LABELS.LISTED_TOTAL, buildTotalAmountCell(listedTotal)]
+        ];
+
+        const rightPriceRows = [
+            [META_LABELS.AGREED_PRICE, buildTotalAmountCell(agreedPrice)],
+            [META_LABELS.AGREED_SHIPPING, agreedShipping]
+        ];
+        if (!isEbay && data.paymentMethod === 'Direktzahlung' && buyerProtection !== 'n/a') {
+            rightPriceRows.push([META_LABELS.BUYER_PROTECTION, buyerProtection]);
+        }
+        rightPriceRows.push([META_LABELS.TOTAL_AMOUNT, buildTotalAmountCell(totalAmount)]);
+
+        const halfWidthPt = Math.floor((TOKENS.page.contentWidthPt - 14) / 2);
+
+        const bottomRows = [];
+        if (!isEbay) {
+            bottomRows.push([
+                META_LABELS.PAYMENT_METHOD,
+                { text: data.paymentMethod || 'n/a', bold: true }
+            ]);
+        }
+        bottomRows.push([
+            META_LABELS.TRACKING_ID,
+            data.trackingId && data.trackingId !== 'n/a'
+                ? buildLinkCell(data.trackingId, data.trackingUrl || '', data.trackingCarrier || '')
+                : 'n/a'
+        ]);
+
+        return {
+            stack: [
+                buildMetaTable(topRows, 155, TOKENS.page.contentWidthPt),
+                {
+                    columns: [
+                        { width: '*', ...buildMetaTable(leftPriceRows, 118, halfWidthPt) },
+                        { width: 14, text: '' },
+                        { width: '*', ...buildMetaTable(rightPriceRows, 115, halfWidthPt) }
+                    ],
+                    margin: [0, 6, 0, 6]
+                },
+                buildMetaTable(bottomRows, 155, TOKENS.page.contentWidthPt),
+                buildExportedAtNode(data.createdAtFormatted || data.exportedAt)
+            ],
+            margin: [0, 0, 0, 6]
+        };
+    }
+
+    /**
+     * Zentrale Funktion für die Artikel-/Anzeigendetails-Metadaten-Sektion (Seite 2) mit identischer Sortierung
+     * für Kleinanzeigen und eBay:
+     * - OHNE Anzeigentitel (steht bereits in der Titelbar darüber)
+     * - Mit Preis, Versand, Gesamtbetrag, Ort, Eingestellt am, Kategorie, dynamischen Artikelmerkmalen,
+     *   Verkäufername, Verkäufer Nutzer-ID, Verkäufer-Typ, Aktiv seit
+     */
+    function buildUnifiedAdMetaSection(data, options = {}) {
+        const listedPrice = normalizeCurrencyToEUR(data.listedPrice || data.price || 'n/a');
+        const listedShipping = normalizeCurrencyToEUR(data.listedShipping || data.shipping || 'n/a');
+        const listedTotal = normalizeCurrencyToEUR(data.listedTotalAmount || data.totalAmount || 'n/a');
+
+        const locationVal = data.location || 'n/a';
+        const mapsUrl =
+            locationVal !== 'n/a'
+                ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(locationVal)}`
+                : '';
+
+        const rows = [
+            [META_LABELS.SOURCE, data.website || data.platformLabel || 'n/a'],
+            [META_LABELS.CREATED_WITH, data.scriptVersion || data.createdBy || 'n/a'],
+            [META_LABELS.AD_ID, buildLinkCell(data.adId || 'n/a', data.adUrl || '')],
+            [META_LABELS.AD_TYPE, data.adType || 'n/a'],
+            [META_LABELS.AGREED_PRICE, buildTotalAmountCell(listedPrice)],
+            [META_LABELS.AGREED_SHIPPING, listedShipping],
+            [META_LABELS.TOTAL_AMOUNT, buildTotalAmountCell(listedTotal)],
+            [META_LABELS.LOCATION, buildLinkCell(locationVal, mapsUrl)],
+            [META_LABELS.CREATED_DATE, data.createdDateFormatted || data.createdAt || 'n/a'],
+            [META_LABELS.CATEGORY, data.category || 'n/a']
+        ];
+
+        if (Array.isArray(data.attributes)) {
+            for (const attr of data.attributes) {
+                if (Array.isArray(attr) && attr.length >= 2) {
+                    rows.push([stripTrailingColon(attr[0]), attr[1]]);
+                } else if (attr && typeof attr === 'object') {
+                    const k = stripTrailingColon(attr.name || attr.label || '');
+                    const v = attr.value || '';
+                    if (k && v) rows.push([k, v]);
+                }
+            }
+        }
+
+        rows.push(
+            [META_LABELS.SELLER_NAME, buildLinkCell(data.sellerName || 'n/a', data.sellerUrl || '')],
+            [META_LABELS.SELLER_ID, buildLinkCell(data.sellerId || 'n/a', data.sellerUrl || '')],
+            [META_LABELS.SELLER_TYPE, data.sellerType || 'n/a'],
+            [META_LABELS.SELLER_SINCE, data.sellerSinceFormatted || data.activeSince || 'n/a']
+        );
+
+        return {
+            stack: [
+                buildMetaTable(rows, 155, TOKENS.page.contentWidthPt),
+                buildExportedAtNode(data.createdAtFormatted || data.exportedAt)
+            ],
+            margin: [0, 0, 0, 8]
         };
     }
 
@@ -1009,10 +1273,11 @@
         return `${dd}.${mm}.${yyyy} ${hh}:${min}:${sec} ${tzShort} (${tzIana})`.trim();
     }
 
-    function buildExportedAtNode(exportedAtStr, label = 'Exportiert / Erstellt am:') {
+    function buildExportedAtNode(exportedAtStr, label = META_LABELS.EXPORTED_AT) {
         const ts = exportedAtStr || formatExportTimestamp();
+        const cleanLabel = stripTrailingColon(label);
         return {
-            text: `${label} ${ts}`,
+            text: `${cleanLabel} ${ts}`,
             alignment: 'right',
             fontSize: TOKENS.typography.exportTimestampSize,
             bold: true,
@@ -1024,7 +1289,7 @@
     function buildSectionHeader(titleText, platform = 'auto', options = {}) {
         const theme = getTheme(platform);
         return {
-            text: buildRichTextWithEmojis(titleText),
+            text: buildRichTextWithEmojis(stripTrailingColon(titleText)),
             fontSize: TOKENS.typography.sectionHeaderSize,
             bold: true,
             color: options.color || theme.sectionHeaderColor || TOKENS.colors.textDark,
@@ -1036,6 +1301,12 @@
 
     function buildDescriptionBlock(descriptionText, platform = 'auto') {
         if (!descriptionText || !String(descriptionText).trim()) return [];
+        const bodyNode = buildParagraphNodeWithColorEmojis(descriptionText, {
+            fontSize: TOKENS.typography.bodyFontSize,
+            lineHeight: TOKENS.page.defaultLineHeight,
+            color: TOKENS.colors.textDesc,
+            maxWidthPt: TOKENS.page.contentWidthPt - 20
+        });
         return [
             buildSectionHeader('Beschreibung', platform, { margin: [0, 6, 0, 4] }),
             {
@@ -1044,10 +1315,7 @@
                     body: [
                         [
                             {
-                                text: buildRichTextWithEmojis(descriptionText),
-                                fontSize: TOKENS.typography.bodyFontSize,
-                                lineHeight: TOKENS.page.defaultLineHeight,
-                                color: TOKENS.colors.textDesc,
+                                stack: Array.isArray(bodyNode.stack) ? bodyNode.stack : [bodyNode],
                                 margin: [8, 6, 8, 6]
                             }
                         ]
@@ -1187,6 +1455,25 @@
         </svg>`;
     }
 
+    /**
+     * Erzeugt das Status-Icon (grünes Häkchen bei akzeptiertem Preisvorschlag, graue Uhr bei abgelaufenem Vorschlag) als SVG.
+     */
+    function buildOfferStatusBadgeSvg(status) {
+        if (status === 'accepted') {
+            return `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="11" fill="#16a34a"/>
+                <path d="M7 12.5l3.2 3.2L17.5 8.5" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>`;
+        }
+        if (status === 'expired' || status === 'declined') {
+            return `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="11" fill="#6b7280"/>
+                <path d="M12 7v5l3 2" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>`;
+        }
+        return '';
+    }
+
     function buildChatBubbleNode(msg, platform = 'auto') {
         const theme = getTheme(platform);
         const bTheme = theme.bubble;
@@ -1209,45 +1496,55 @@
         let estimatedBodyHeightPt = 0;
 
         if (msg.offer) {
-            const offerTitleW = measureTextWidthPt(msg.offer.title || 'Preisvorschlag', 9.5, true);
-            const offerAmountW = measureTextWidthPt(msg.offer.amount || '', 11, true);
-            longestContentPt = Math.max(longestContentPt, offerTitleW + 20, offerAmountW + 20);
-            estimatedBodyHeightPt += 42;
+            const offerTitleStr = cleanTextPreserveEmojis(msg.offer.title || 'Preisvorschlag');
+            const offerAmountStr = normalizeCurrencyToEUR(msg.offer.amount || '');
+            const offerStatus = msg.offer.status || '';
+
+            const offerTitleW = measureTextWidthPt(offerTitleStr, 9.5, true);
+            const offerAmountW = measureTextWidthPt(offerAmountStr, 11.5, true);
+            const badgeExtraW = offerStatus ? 22 : 0;
+            longestContentPt = Math.max(longestContentPt, offerTitleW + badgeExtraW + 16, offerAmountW + 16);
+
+            const innerAvailW = Math.min(MAX_BUBBLE_WIDTH_PT - padX * 2 - 16, Math.max(120, offerTitleW + badgeExtraW));
+            const titleLines = estimateWrappedLineCount(offerTitleStr, innerAvailW, 9.5, true);
+            estimatedBodyHeightPt += titleLines * 13 + (offerAmountStr && offerAmountStr !== 'n/a' ? 20 : 6);
+
+            const badgeSvg = buildOfferStatusBadgeSvg(offerStatus);
+            const titleRowNode = badgeSvg
+                ? {
+                      columns: [
+                          { svg: badgeSvg, width: 15, margin: [0, 0.5, 5, 0] },
+                          {
+                              width: '*',
+                              text: buildRichTextWithEmojis(offerTitleStr),
+                              bold: true,
+                              fontSize: 9.5,
+                              color: offerStatus === 'accepted' ? '#15803d' : '#111827'
+                          }
+                      ],
+                      columnGap: 4
+                  }
+                : {
+                      text: buildRichTextWithEmojis(offerTitleStr),
+                      bold: true,
+                      fontSize: 9.5,
+                      color: '#111827'
+                  };
+
+            const offerStack = [titleRowNode];
+            if (offerAmountStr && offerAmountStr !== 'n/a') {
+                offerStack.push({
+                    text: buildRichTextWithEmojis(offerAmountStr),
+                    bold: true,
+                    fontSize: 11.5,
+                    color: '#111827',
+                    margin: [badgeSvg ? 19 : 0, 3, 0, 0]
+                });
+            }
 
             bubbleStack.push({
-                table: {
-                    widths: ['*'],
-                    body: [
-                        [
-                            {
-                                stack: [
-                                    {
-                                        text: buildRichTextWithEmojis(msg.offer.title || 'Preisvorschlag'),
-                                        bold: true,
-                                        fontSize: 9.5,
-                                        color: '#111111'
-                                    },
-                                    {
-                                        text: buildRichTextWithEmojis(msg.offer.amount || ''),
-                                        bold: true,
-                                        fontSize: 11,
-                                        color: '#111111',
-                                        margin: [0, 2, 0, 0]
-                                    }
-                                ],
-                                fillColor: isOwn ? bTheme.offerBoxOwnFill : bTheme.offerBoxPartnerFill,
-                                margin: [8, 5, 8, 5]
-                            }
-                        ]
-                    ]
-                },
-                layout: {
-                    hLineWidth: () => 0.5,
-                    vLineWidth: () => 0.5,
-                    hLineColor: () => bTheme.offerBoxBorder,
-                    vLineColor: () => bTheme.offerBoxBorder
-                },
-                margin: [0, 2, 0, 4]
+                stack: offerStack,
+                margin: [0, 2, 0, msg.text ? 6 : 2]
             });
         }
 
@@ -1265,7 +1562,7 @@
                 const labelText =
                     item.filename ||
                     (item.index
-                        ? `📎 Originalbild im PDF-Anhang: Chat_Foto_${String(item.index).padStart(2, '0')}.jpg`
+                        ? `Originalbild im PDF-Anhang: Chat_Foto_${String(item.index).padStart(2, '0')}.jpg`
                         : '');
 
                 const imgW = item.width || 400;
@@ -1293,13 +1590,7 @@
 
         if (msg.text) {
             const textW = measureTextWidthPt(msg.text, TOKENS.typography.bodyFontSize, false);
-            longestContentPt = Math.max(longestContentPt, textW);
-            bubbleStack.push({
-                text: buildRichTextWithEmojis(msg.text),
-                fontSize: TOKENS.typography.bodyFontSize,
-                lineHeight: TOKENS.page.defaultLineHeight,
-                color: textColor
-            });
+            longestContentPt = Math.max(longestContentPt, textW + (hasColorEmoji(msg.text) ? 14 : 0));
         }
 
         const bubbleWidthPt = Math.min(
@@ -1309,6 +1600,14 @@
 
         if (msg.text) {
             const availTextW = Math.max(40, bubbleWidthPt - padX * 2);
+            const msgBodyNode = buildParagraphNodeWithColorEmojis(msg.text, {
+                fontSize: TOKENS.typography.bodyFontSize,
+                lineHeight: TOKENS.page.defaultLineHeight,
+                color: textColor,
+                maxWidthPt: availTextW
+            });
+            bubbleStack.push(msgBodyNode);
+
             const lineCount = estimateWrappedLineCount(
                 msg.text,
                 availTextW,
@@ -1357,11 +1656,6 @@
         };
     }
 
-    /**
-     * Erzeugt eine einzelne Chat-Nachrichtenzeile:
-     * - Nutzericon sitzt links unten neben der Chat-Bubble (Unterkante Nutzericon = Unterkante Chat-Bubble).
-     * - Zeitstempel (<dd.mm.yyyy, hh:mm>) sitzt unter der Chat-Bubble (links beim Sender mit Nutzericon, rechts bei eigenen Nachrichten).
-     */
     function buildChatMessageRow(msg, options = {}) {
         const platform = options.platform || 'auto';
         const { bubbleNode, bubbleWidthPt, bubbleHeightPt, isOwn } = buildChatBubbleNode(msg, platform);
@@ -1374,7 +1668,7 @@
         const subtextStack = [];
         if (msg.warningText) {
             subtextStack.push({
-                text: buildRichTextWithEmojis(`⚠️ ${msg.warningText}`),
+                text: buildRichTextWithEmojis(msg.warningText),
                 fontSize: 8,
                 bold: true,
                 color: TOKENS.colors.textWarning,
@@ -1470,7 +1764,7 @@
     function buildSystemMessageNode(msg, fallbackDate = '') {
         const sysStack = [
             {
-                text: buildRichTextWithEmojis(msg.title || 'Systemnachricht'),
+                text: buildRichTextWithEmojis(normalizeCurrencyToEUR(msg.title || 'Systemnachricht')),
                 bold: true,
                 fontSize: 10,
                 color: '#111827',
@@ -1479,7 +1773,7 @@
         ];
         if (msg.breakdown) {
             sysStack.push({
-                text: buildRichTextWithEmojis(msg.breakdown),
+                text: buildRichTextWithEmojis(normalizeCurrencyToEUR(msg.breakdown)),
                 fontSize: 9,
                 bold: true,
                 color: '#1d4b00',
@@ -1487,11 +1781,13 @@
             });
         }
         if (msg.text) {
-            sysStack.push({
-                text: buildRichTextWithEmojis(msg.text),
-                fontSize: 9,
-                color: '#374151'
-            });
+            sysStack.push(
+                buildParagraphNodeWithColorEmojis(msg.text, {
+                    fontSize: 9,
+                    color: '#374151',
+                    maxWidthPt: TOKENS.page.contentWidthPt - 24
+                })
+            );
         }
 
         const sysCard = buildRoundedCardPdfNode({
@@ -1533,13 +1829,6 @@
         };
     }
 
-    /**
-     * Zentrale Funktion zur Generierung des gesamten Nachrichtenverlaufs (für Kleinanzeigen & eBay):
-     * - Fügt vor jedem neuen Tag automatisch die Überschrift "<dd. mmm. yyyy>" (z. B. "01. Jan. 2026") ein.
-     * - Formatiert alle Zeitstempel einheitlich nach "<dd.mm.yyyy, hh:mm>".
-     * - Positioniert das Nutzericon links unten an der Chat-Bubble (Unterkante = Unterkante der Bubble).
-     * - Rendert Emojis sowie "⸻ Ende des Nachrichtenverlaufs ⸻" (U+2E3B).
-     */
     function buildChatHistoryNodes(messages, options = {}) {
         const platform = options.platform || 'auto';
         const partnerAvatarDataUrl = options.partnerAvatarDataUrl || null;
@@ -1706,26 +1995,35 @@
 
     global.PdfSharedTheme = Object.freeze({
         TOKENS,
+        META_LABELS,
         MONTH_SHORT_DE,
         resolvePlatform,
         getTheme,
         measureTextWidthPt,
+        stripTrailingColon,
+        normalizeCurrencyToEUR,
         cleanTextPreserveEmojis,
         extractTextFromNodePreserveEmojis,
         buildRichTextWithEmojis,
+        buildParagraphNodeWithColorEmojis,
         ensurePdfMakeEmojiFontRegistered,
+        buildKleinanzeigenBrandImageDataUrl,
         normalizeMessageTimestamp,
         formatDateGroupLabel,
+        formatDateWithRelativeAge,
         buildTitleBar,
         buildLinkCell,
         buildTotalAmountCell,
         buildMetaTable,
+        buildUnifiedChatMetaSection,
+        buildUnifiedAdMetaSection,
         formatExportTimestamp,
         buildExportedAtNode,
         buildSectionHeader,
         buildDescriptionBlock,
         buildRoundedCardPdfNode,
         buildAvatarCircleSvg,
+        buildOfferStatusBadgeSvg,
         buildChatBubbleNode,
         buildDateSeparatorNode,
         buildMessageSubtextNode,
