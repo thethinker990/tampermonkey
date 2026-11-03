@@ -1,33 +1,36 @@
 /**
- * Zentrale Design-, Layout- & Komponenten-Bibliothek für eBay & Kleinanzeigen PDF-Export (pdfmake)
- * Version: 2.2.0
+ * PdfSharedTheme – gemeinsame Design-, Layout- & Komponenten-Bibliothek (pdfmake) für alle
+ * Marktplatz-PDF-Exporter (eBay, Kleinanzeigen, später z. B. Vinted).
+ * Version: 3.0.0
  *
- * Einbindung in beide Tampermonkey-Skripte via:
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-shared-theme.js
+ * Verantwortung: NUR Darstellung. Plattform-Adapter liefern ein einheitliches Datenmodell
+ * (siehe specs/001-marketplace-pdf-export/plan.md "Data Model"), diese Bibliothek baut daraus das komplette PDF-Dokument
+ * (buildExportDocument). Ablauf/DB/Settings/Toast liegen in marketplace-export-core.js.
+ *
+ * Einbindung (versionierte URL, sonst cached Tampermonkey die alte Datei):
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/v3.0.0/pdf-shared-theme.js
  */
 (function (global) {
     'use strict';
 
-    const EBAY_SHARED_BUBBLE_GREY = '#e5e7eb';
+    const LIB_VERSION = '3.0.0';
 
     const MONTH_SHORT_DE = Object.freeze([
-        'Jan.', 'Feb.', 'Mär.', 'Apr.', 'Mai.', 'Jun.',
+        'Jan.', 'Feb.', 'Mär.', 'Apr.', 'Mai', 'Jun.',
         'Jul.', 'Aug.', 'Sep.', 'Okt.', 'Nov.', 'Dez.'
     ]);
 
-    /**
-     * Einheitliche Feldbezeichnungen (ohne Doppelpunkt!) für Kleinanzeigen & eBay
-     */
+    /** Einheitliche Feldbezeichnungen (ohne Doppelpunkt) für alle Plattformen. */
     const META_LABELS = Object.freeze({
         SOURCE: 'Quelle',
         CREATED_WITH: 'Erstellt mit',
         AD_ID: 'Anzeigen-ID',
         CONV_ID: 'Nachrichten-ID',
+        ORDER_ID: 'Bestellnummer',
         AD_TYPE: 'Anzeigentyp',
         CATEGORY: 'Kategorie',
         BUYER_NAME: 'Käufername',
         SELLER_NAME: 'Verkäufername',
-        SELLER_ID: 'Verkäufer Nutzer-ID',
         SELLER_TYPE: 'Verkäufer-Typ',
         SELLER_SINCE: 'Aktiv seit',
         LOCATION: 'Ort',
@@ -36,7 +39,7 @@
         LISTED_SHIPPING: 'Versand (Anzeige)',
         LISTED_TOTAL: 'Gesamtbetrag (Anzeige)',
         AGREED_PRICE: 'Preis',
-        BUYER_PROTECTION: 'Käuferschutz-Gebühr',
+        BUYER_PROTECTION: 'Käuferschutz',
         AGREED_SHIPPING: 'Versand',
         TOTAL_AMOUNT: 'Gesamtbetrag',
         PAYMENT_METHOD: 'Zahlungsart',
@@ -60,17 +63,21 @@
                 headerText: '#111827',
                 sectionHeaderColor: '#1d4b00',
                 bubble: {
+                    radiusPt: 12,
+                    padX: 8.5,
+                    padY: 4.5,
                     outboundFill: '#b5e941',
-                    outboundBorder: null,
+                    outboundBorder: '',
                     outboundText: '#1d4b00',
                     inboundFill: '#f4f2ef',
-                    inboundBorder: null,
-                    inboundText: '#1a1a1a',
-                    offerBoxOwnFill: '#a4dc34',
-                    offerBoxPartnerFill: '#ffffff',
-                    offerBoxBorder: '#9dc730',
-                    sharpCornerOnSendersSide: false
-                }
+                    inboundBorder: '',
+                    inboundText: '#0c0c0b',
+                    sharpCornerOnSendersSide: true
+                },
+                card: { border: '#bebcb7', fill: '#ffffff', radiusPt: 6, eyebrowSize: 10.5, amountSize: 19.5 },
+                offer: { ownBorder: '#1d4b00', partnerBorder: '#bebcb7', fill: '#ffffff', titleSize: 9.5, amountSize: 15 },
+                avatar: { bg: '#bebcb7', fg: '#33322e' },
+                securityPill: { fill: '#e9f7c9', text: '#1d4b00' }
             },
             ebay: {
                 headerFill: '#d4e5fe',
@@ -78,17 +85,21 @@
                 headerText: '#111827',
                 sectionHeaderColor: '#111827',
                 bubble: {
-                    outboundFill: EBAY_SHARED_BUBBLE_GREY,
-                    outboundBorder: null,
-                    outboundText: '#111827',
+                    radiusPt: 12,
+                    padX: 9,
+                    padY: 5,
+                    outboundFill: '#f7f7f7',
+                    outboundBorder: '',
+                    outboundText: '#191919',
                     inboundFill: '#ffffff',
-                    inboundBorder: EBAY_SHARED_BUBBLE_GREY,
-                    inboundText: '#111827',
-                    offerBoxOwnFill: '#ffffff',
-                    offerBoxPartnerFill: '#f9fafb',
-                    offerBoxBorder: EBAY_SHARED_BUBBLE_GREY,
+                    inboundBorder: '#e5e5e5',
+                    inboundText: '#191919',
                     sharpCornerOnSendersSide: false
-                }
+                },
+                card: { border: '#e5e5e5', fill: '#ffffff', radiusPt: 9, eyebrowSize: 10, amountSize: 15 },
+                offer: { ownBorder: '#191919', partnerBorder: '#e5e5e5', fill: '#ffffff', titleSize: 9, amountSize: 15 },
+                avatar: { bg: '#44ccd5', fg: '#07465a' },
+                securityPill: { fill: '#f7f7f7', text: '#191919' }
             }
         },
         colors: {
@@ -98,7 +109,7 @@
             textLabel: '#222222',
             textExportedAt: '#374151',
             textMuted: '#4b5563',
-            textTimestamp: '#666460',
+            textTimestamp: '#707070',
             textWarning: '#dc2626',
             link: '#0b57d0',
             tableBorder: '#d1d5db',
@@ -106,8 +117,9 @@
             tableRowOdd: '#ffffff',
             descBoxBg: '#f9fafb',
             descBoxBorder: '#e5e7eb',
-            avatarBg: '#e6e4e0',
-            avatarText: '#666460'
+            noticeFill: '#fff7e6',
+            noticeBorder: '#f0a500',
+            translationRule: '#c7c7c7'
         },
         typography: {
             titleHeaderSize: 13,
@@ -115,14 +127,16 @@
             tableFontSize: 9.5,
             bodyFontSize: 9.5,
             exportTimestampSize: 8.5,
-            dateSeparatorSize: 9.5,
+            dateSeparatorSize: 9,
             messageTimestampSize: 8,
             endOfChatSize: 10,
             footerFontSize: 9,
-            galleryCaptionSize: 8.5
+            galleryCaptionSize: 8.5,
+            attachmentCaptionSize: 7
         },
         table: {
-            defaultLabelWidth: 155,
+            defaultLabelWidth: 150,
+            priceBlockGapPt: 14,
             padX: 4,
             padY: 3.5,
             borderWidth: 0.5,
@@ -133,8 +147,15 @@
             boxHeightPt: 200,
             columnGapPt: 14,
             canvasTargetWidthPx: 980,
-            canvasTargetHeightPx: 800,
-            cropMode: 'contain'
+            canvasTargetHeightPx: 800
+        },
+        chat: {
+            maxBubbleShare: 0.62,
+            minBubbleWidthPt: 78,
+            avatarSizePt: 24,
+            avatarColWidthPt: 30,
+            singleImageFitPt: 180,
+            multiImageFitPt: 96
         }
     });
 
@@ -212,21 +233,6 @@
         return String(labelStr).replace(/\s*:\s*$/, '').trim();
     }
 
-    /**
-     * Ersetzt alle €-Symbole durch "EUR" und bereinigt ",00 EUR" zu glatten "EUR"-Beträgen.
-     */
-    function normalizeCurrencyToEUR(rawStr) {
-        if (rawStr === null || rawStr === undefined) return 'n/a';
-        const s = String(rawStr).trim();
-        if (!s || s === 'n/a') return 'n/a';
-        return s
-            .replace(/€/g, 'EUR')
-            .replace(/\bEUR\s*(\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?)\b/gi, '$1 EUR')
-            .replace(/\b(\d{1,6})[,.]00(\s*EUR)\b/g, '$1$2')
-            .replace(/\s+/g, ' ')
-            .trim();
-    }
-
     function cleanTextPreserveEmojis(str) {
         if (str === null || str === undefined) return '';
         return String(str)
@@ -288,8 +294,6 @@
      * ========================================================================== */
 
     const EMOJI_TOKEN_REGEX = /(\u2E3B|(?:[\u2700-\u27BF]|(?:\uD83C[\uDDE6-\uDDFF]){2}|[\uD83C-\uDBFF][\uDC00-\uDFFF]|[\u2600-\u26FF\u2300-\u23FF\u2B50\u2B55\u203C\u2049\u2122\u2139\u2194-\u21AA\u2934-\u2935\u3030\u303D\u3297\u3299])(?:\uFE0F)?(?:\uD83C[\uDFFB-\uDFFF])?(?:\u200D(?:[\u2700-\u27BF]|[\uD83C-\uDBFF][\uDC00-\uDFFF]|[\u2600-\u26FF\u2300-\u23FF])(?:\uFE0F)?(?:\uD83C[\uDFFB-\uDFFF])?)*)/g;
-
-    const registeredCodepoints = new Set([0x2E3B]);
 
     function buildThreeEmDashFontBase64() {
         const glyphs = [
@@ -655,15 +659,18 @@
         const lineHeight = options.lineHeight || TOKENS.page.defaultLineHeight;
         const color = options.color || TOKENS.colors.textPrimary;
         const bold = Boolean(options.bold);
+        const italics = Boolean(options.italics);
         const maxWidthPt = options.maxWidthPt || 310;
+        const toRuns = (s) => (options.withLinks ? buildRichTextWithLinks(s) : buildRichTextWithEmojis(s));
 
         if (!hasColorEmoji(cleaned)) {
             return {
-                text: buildRichTextWithEmojis(cleaned),
+                text: toRuns(cleaned),
                 fontSize,
                 lineHeight,
                 color,
-                bold
+                bold,
+                italics
             };
         }
 
@@ -693,71 +700,16 @@
                 }
             }
             stackNodes.push({
-                text: buildRichTextWithEmojis(line),
+                text: toRuns(line),
                 fontSize,
                 lineHeight,
                 color,
-                bold
+                bold,
+                italics
             });
         }
 
         return stackNodes.length === 1 ? stackNodes[0] : { stack: stackNodes };
-    }
-
-    /* ==========================================================================
-     * KLEINANZEIGEN-BRAND-LOGO (ALS HOCHAUFLÖSENDES PNG STATT FEHLERHAFTEM SVG)
-     * ========================================================================== */
-
-    let cachedKaBrandPngDataUrl = null;
-
-    /**
-     * Erzeugt das Kleinanzeigen-Logo + Schriftzug als gestochen scharfes PNG-DataURL (via Canvas),
-     * damit pdfmake beim SVG-Parsing weder Pfad-Artefakte noch Schrift-Verschiebungen produziert.
-     */
-    function buildKleinanzeigenBrandImageDataUrl() {
-        if (cachedKaBrandPngDataUrl) return cachedKaBrandPngDataUrl;
-        if (typeof document === 'undefined') return '';
-
-        const scale = 3;
-        const w = 138;
-        const h = 24;
-        const canvas = document.createElement('canvas');
-        canvas.width = w * scale;
-        canvas.height = h * scale;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return '';
-
-        ctx.scale(scale, scale);
-        ctx.clearRect(0, 0, w, h);
-
-        // Grünes Pin-/Schleifen-Emblem links
-        ctx.save();
-        ctx.fillStyle = '#b5e941';
-        ctx.beginPath();
-        ctx.arc(11, 12, 9.5, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.strokeStyle = '#1d4b00';
-        ctx.lineWidth = 2.1;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.beginPath();
-        ctx.moveTo(8, 6.5);
-        ctx.lineTo(8, 17.5);
-        ctx.moveTo(14.5, 7.5);
-        ctx.lineTo(8.5, 12.2);
-        ctx.lineTo(15, 17);
-        ctx.stroke();
-        ctx.restore();
-
-        // Wortmarke "kleinanzeigen"
-        ctx.fillStyle = '#1d4b00';
-        ctx.font = 'bold 15.5px Roboto, Arial, sans-serif';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('kleinanzeigen', 25, 12.5);
-
-        cachedKaBrandPngDataUrl = canvas.toDataURL('image/png');
-        return cachedKaBrandPngDataUrl;
     }
 
     /* ==========================================================================
@@ -917,6 +869,10 @@
         return '';
     }
 
+    /* ==========================================================================
+     * PLATTFORM / THEME
+     * ========================================================================== */
+
     function resolvePlatform(platformParam) {
         if (platformParam && typeof platformParam === 'string') {
             const p = platformParam.toLowerCase().trim();
@@ -936,30 +892,244 @@
         return TOKENS.themes[key] || TOKENS.themes.kleinanzeigen;
     }
 
+    const isNa = (v) => v === null || v === undefined || String(v).trim() === '' || /^n\/?a$/i.test(String(v).trim());
+
+    /* ==========================================================================
+     * GELDBETRÄGE (EUR hinten, Präfix VB/ab vorne, rechtsbündig, einheitliche Nachkommastellen)
+     * ========================================================================== */
+
+    /**
+     * Zerlegt einen beliebigen Preis-String ("1 € VB", "EUR 15,00", "+ Versand ab 3,99 €", "15.00", "Kostenlos")
+     * in { prefix, cents, special }. special = Klartext ohne Zahl (z. B. "Abholung").
+     */
+    function parseMoney(raw) {
+        if (raw && typeof raw === 'object' && 'cents' in raw) return raw;
+        const s = String(raw === null || raw === undefined ? '' : raw).replace(/\u00a0/g, ' ').trim();
+        if (isNa(s)) return { special: 'n/a', cents: null, prefix: '' };
+        if (/zu\s+verschenken/i.test(s)) return { special: 'Zu verschenken', cents: 0, prefix: '' };
+
+        const prefix = /\b(VB|VHB|Verhandlungsbasis)\b/i.test(s) ? 'VB' : /(^|\s)ab(\s|$)/i.test(s) ? 'ab' : '';
+        let m = /^(\d+)\.(\d{2})$/.exec(s);
+        let cents = null;
+        if (m) {
+            cents = parseInt(m[1], 10) * 100 + parseInt(m[2], 10);
+        } else {
+            m = /(\d{1,3}(?:\.\d{3})+|\d+)(?:,(\d{1,2}))?/.exec(s);
+            if (m) {
+                cents = parseInt(m[1].replace(/\./g, ''), 10) * 100 + (m[2] ? parseInt(m[2].padEnd(2, '0'), 10) : 0);
+            }
+        }
+        if (cents === null) {
+            if (/kostenlos|gratis|free/i.test(s)) return { special: 'Kostenlos', cents: 0, prefix: '' };
+            if (/abhol/i.test(s)) return { special: 'Abholung', cents: 0, prefix: '' };
+            if (/inkl/i.test(s)) return { special: 'inkl. Versand', cents: 0, prefix: '' };
+            return { special: s, cents: null, prefix: '' };
+        }
+        return { special: '', cents, prefix };
+    }
+
+    function formatEuroAmount(cents, withDecimals) {
+        const euros = Math.floor(Math.abs(cents) / 100);
+        const rest = Math.abs(cents) % 100;
+        const intStr = String(euros).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+        const sign = cents < 0 ? '-' : '';
+        return withDecimals || rest !== 0 ? `${sign}${intStr},${String(rest).padStart(2, '0')} EUR` : `${sign}${intStr} EUR`;
+    }
+
+    /** true, wenn mindestens ein Betrag der Gruppe Nachkommastellen hat -> dann zeigen alle ",00". */
+    function moneyGroupNeedsDecimals(values) {
+        return values.map(parseMoney).some((m) => m.cents !== null && !m.special && m.cents % 100 !== 0);
+    }
+
+    function formatMoneyText(raw, withDecimals = false) {
+        const m = parseMoney(raw);
+        if (m.special) return m.special;
+        return `${m.prefix ? m.prefix + ' ' : ''}${formatEuroAmount(m.cents, withDecimals)}`;
+    }
+
+    /** Tabellenzelle: Präfix links, Betrag rechtsbündig (EUR untereinander). */
+    function buildMoneyCell(raw, withDecimals = false, bold = false) {
+        const m = parseMoney(raw);
+        if (m.special) {
+            return { text: m.special, bold, alignment: m.cents === 0 || m.special === 'n/a' ? 'right' : 'left' };
+        }
+        const amount = formatEuroAmount(m.cents, withDecimals);
+        if (!m.prefix) return { text: amount, bold, alignment: 'right' };
+        return {
+            columns: [
+                { text: m.prefix, width: 'auto', bold },
+                { text: amount, width: '*', alignment: 'right', bold }
+            ],
+            columnGap: 4,
+            __plain: `${m.prefix} ${amount}`
+        };
+    }
+
+    /** Summe aus Preis-Bestandteilen. Liefert '' wenn der Grundpreis fehlt. */
+    function sumMoney(parts) {
+        const parsed = parts.map(parseMoney);
+        if (parsed.length === 0 || parsed[0].cents === null) return '';
+        let total = 0;
+        let prefix = '';
+        for (const p of parsed) {
+            if (p.cents === null) continue;
+            total += p.cents;
+            if (p.prefix === 'ab') prefix = 'ab';
+            else if (p.prefix === 'VB' && !prefix) prefix = 'VB';
+        }
+        return { special: '', cents: total, prefix };
+    }
+
+    /* ==========================================================================
+     * LINKS & RICH TEXT
+     * ========================================================================== */
+
+    const URL_REGEX = /(https?:\/\/[^\s<>"')]+[^\s<>"').,;:!?])/g;
+
+    function linkRun(text, url) {
+        return { text, link: url, color: TOKENS.colors.link, decoration: 'underline' };
+    }
+
+    /** Text -> pdfmake-Inline-Array, URLs werden klickbar. */
+    function buildRichTextWithLinks(rawStr) {
+        const str = String(rawStr || '');
+        if (!URL_REGEX.test(str)) {
+            URL_REGEX.lastIndex = 0;
+            return buildRichTextWithEmojis(str);
+        }
+        URL_REGEX.lastIndex = 0;
+        const runs = [];
+        let last = 0;
+        let m;
+        while ((m = URL_REGEX.exec(str)) !== null) {
+            if (m.index > last) runs.push(str.slice(last, m.index));
+            runs.push(linkRun(m[1], m[1]));
+            last = m.index + m[1].length;
+        }
+        if (last < str.length) runs.push(str.slice(last));
+        return runs;
+    }
+
+    /** Runs aus dem DOM ({text, link}) -> pdfmake-Inline-Array. */
+    function buildRunsNode(runs) {
+        if (!Array.isArray(runs)) return buildRichTextWithLinks(runs);
+        return runs.map((r) => (typeof r === 'string' ? r : r.link ? linkRun(r.text, r.link) : r.text || ''));
+    }
+
+    /** "Wert (Link)" bzw. "Wert (DHL Link)". */
+    function buildLinkCell(labelValue, url, carrierPrefix = '') {
+        const cleanVal = isNa(labelValue) ? 'n/a' : String(labelValue).trim();
+        if (!url) {
+            return carrierPrefix && cleanVal !== 'n/a' ? `${cleanVal} (${carrierPrefix})` : cleanVal;
+        }
+        const prefix = carrierPrefix ? `${carrierPrefix} ` : '';
+        return {
+            text: [`${cleanVal} (${prefix}`, linkRun('Link', url), ')'],
+            __plain: `${cleanVal} (${prefix}Link)`
+        };
+    }
+
+    /* ==========================================================================
+     * TABELLEN
+     * ========================================================================== */
+
+    function plainOf(cellVal) {
+        if (cellVal && typeof cellVal === 'object' && cellVal.__plain) return cellVal.__plain;
+        return extractPlainTextFromCell(cellVal);
+    }
+
+    /**
+     * Metadaten-Tabelle (2 Spalten). Optionen:
+     *  - startIndex: Zebra-Streifen setzen die Zählung der vorherigen Tabelle fort
+     *  - labelWidth / width: Spaltenbreiten (Label nie umbrechen: Breite wird gemessen)
+     * Zeilen mit value === undefined werden ausgelassen.
+     */
+    function buildMetaTable(rows, options = {}) {
+        const startIndex = options.startIndex || 0;
+        const totalTableWidth = options.width || TOKENS.page.contentWidthPt;
+        const fontSize = TOKENS.typography.tableFontSize;
+        const lineHeight = TOKENS.table.cellLineHeight;
+        const padX = TOKENS.table.padX;
+        const basePadY = TOKENS.table.padY;
+        const visible = rows.filter((r) => r && r[1] !== undefined);
+
+        let labelWidth = options.labelWidth || TOKENS.table.defaultLabelWidth;
+        for (const [rawLabel] of visible) {
+            const measured = Math.ceil(measureTextWidthPt(stripTrailingColon(plainOf(rawLabel)), fontSize, true) * 1.08 + padX * 2 + 4);
+            if (measured > labelWidth) labelWidth = measured;
+        }
+        labelWidth = Math.min(Math.round(totalTableWidth * 0.55), labelWidth);
+
+        const singleLineHeightPt = +(fontSize * 1.17 * lineHeight).toFixed(2);
+        const availLabelW = Math.max(30, labelWidth - padX * 2);
+        const availValueW = Math.max(50, totalTableWidth - labelWidth - padX * 2);
+
+        const body = visible.map(([rawLabel, val]) => {
+            const cleanLabelStr = stripTrailingColon(plainOf(rawLabel));
+            const valStr = plainOf(val);
+            const isValBold = Boolean(val && typeof val === 'object' && val.bold);
+            const labelLines = estimateWrappedLineCount(cleanLabelStr, availLabelW, fontSize, true);
+            const valLines = estimateWrappedLineCount(valStr, availValueW, fontSize, isValBold);
+            const maxLines = Math.max(labelLines, valLines);
+            const labelExtra = ((maxLines - labelLines) * singleLineHeightPt) / 2;
+            const valExtra = ((maxLines - valLines) * singleLineHeightPt) / 2;
+
+            const labelCell = {
+                text: buildRichTextWithEmojis(cleanLabelStr),
+                bold: true,
+                fontSize,
+                lineHeight,
+                color: TOKENS.colors.textLabel,
+                margin: [padX, basePadY + labelExtra, padX, basePadY + labelExtra]
+            };
+            const valMargin = [padX, basePadY + valExtra, padX, basePadY + valExtra];
+            let valueCell;
+            if (val === null || typeof val === 'string' || typeof val === 'number') {
+                valueCell = { text: buildRichTextWithLinks(isNa(val) ? 'n/a' : String(val)), fontSize, lineHeight, color: TOKENS.colors.textPrimary, margin: valMargin };
+            } else {
+                const clone = { ...val };
+                delete clone.__plain;
+                valueCell = { fontSize, lineHeight, color: TOKENS.colors.textPrimary, ...clone, margin: valMargin };
+            }
+            return [labelCell, valueCell];
+        });
+
+        if (body.length === 0) return { text: '' };
+        return {
+            table: { widths: [labelWidth, '*'], body, dontBreakRows: true },
+            layout: {
+                hLineWidth: () => TOKENS.table.borderWidth,
+                vLineWidth: () => TOKENS.table.borderWidth,
+                hLineColor: () => TOKENS.colors.tableBorder,
+                vLineColor: () => TOKENS.colors.tableBorder,
+                fillColor: (rowIndex) => ((rowIndex + startIndex) % 2 === 0 ? TOKENS.colors.tableRowEven : TOKENS.colors.tableRowOdd),
+                paddingLeft: () => 0,
+                paddingRight: () => 0,
+                paddingTop: () => 0,
+                paddingBottom: () => 0
+            },
+            __rowCount: body.length
+        };
+    }
+
+    function rowCountOf(tableNode) {
+        return tableNode && tableNode.__rowCount ? tableNode.__rowCount : 0;
+    }
+
     function buildTitleBar(titleText, platform = 'auto', options = {}) {
         const theme = getTheme(platform);
-        const fontSize = TOKENS.typography.titleHeaderSize;
-        const lineHeight = 1.08;
-        const padTop = 6;
-        const padBottom = 5;
-
         const node = {
             table: {
                 widths: ['*'],
-                body: [
-                    [
-                        {
-                            text: buildRichTextWithEmojis(titleText || 'Unbekannter Artikel'),
-                            bold: true,
-                            fontSize,
-                            lineHeight,
-                            color: theme.headerText,
-                            fillColor: theme.headerFill,
-                            verticalAlignment: 'middle',
-                            margin: [8, padTop, 8, padBottom]
-                        }
-                    ]
-                ]
+                body: [[{
+                    text: buildRichTextWithEmojis(titleText || 'Unbekannter Artikel'),
+                    fontSize: TOKENS.typography.titleHeaderSize,
+                    lineHeight: 1.08,
+                    bold: true,
+                    color: theme.headerText,
+                    fillColor: theme.headerFill,
+                    margin: [8, 6, 8, 5]
+                }]]
             },
             layout: {
                 hLineWidth: () => 1,
@@ -971,321 +1141,13 @@
                 paddingTop: () => 0,
                 paddingBottom: () => 0
             },
-            margin: options.margin || [0, 0, 0, 10]
+            margin: [0, 0, 0, 8]
         };
-
-        if (options.pageBreak) {
-            node.pageBreak = options.pageBreak;
-        }
+        if (options.pageBreak) node.pageBreak = options.pageBreak;
         return node;
     }
 
-    function buildLinkCell(labelValue, url, carrierPrefix = '') {
-        const cleanVal = cleanTextPreserveEmojis(labelValue);
-        if (!cleanVal || cleanVal === 'n/a') {
-            if (url) {
-                return {
-                    text: [
-                        'n/a (',
-                        { text: 'Link', link: url, color: TOKENS.colors.link, decoration: 'underline' },
-                        ')'
-                    ]
-                };
-            }
-            return 'n/a';
-        }
-        if (!url) {
-            return carrierPrefix ? `${cleanVal} (${carrierPrefix})` : cleanVal;
-        }
-        const prefix = carrierPrefix ? `${carrierPrefix} ` : '';
-        return {
-            text: [
-                `${prefix}${cleanVal} (`,
-                { text: 'Link', link: url, color: TOKENS.colors.link, decoration: 'underline' },
-                ')'
-            ]
-        };
-    }
-
-    function buildTotalAmountCell(amountText) {
-        return {
-            text: normalizeCurrencyToEUR(amountText || 'n/a'),
-            bold: true,
-            fontSize: TOKENS.typography.tableFontSize,
-            color: TOKENS.colors.textPrimary
-        };
-    }
-
-    /**
-     * Baut eine Metadaten-Tabelle:
-     * - Entfernt automatisch jeden Doppelpunkt am Ende der linken Spalte.
-     * - Berechnet die Spaltenbreite der linken Spalte so, dass selbst lange Wörter wie
-     *   "Sendungsverfolgungsnummer" garantiert in 1 Zeile passen (kein Umbruch auf 2 Zeilen!).
-     */
-    function buildMetaTable(rows, labelWidth = TOKENS.table.defaultLabelWidth, totalTableWidth = TOKENS.page.contentWidthPt) {
-        const fontSize = TOKENS.typography.tableFontSize;
-        const lineHeight = TOKENS.table.cellLineHeight;
-        const padX = TOKENS.table.padX;
-        const basePadY = TOKENS.table.padY;
-
-        // Dynamische Mindestbreite für das längste Label (damit "Sendungsverfolgungsnummer" niemals umbricht)
-        let longestLabelPt = labelWidth;
-        for (const [rawLabel] of rows) {
-            const cleanLbl = stripTrailingColon(extractPlainTextFromCell(rawLabel));
-            const measured = Math.ceil(measureTextWidthPt(cleanLbl, fontSize, true) + padX * 2 + 8);
-            if (measured > longestLabelPt) {
-                longestLabelPt = measured;
-            }
-        }
-        const effectiveLabelWidth = Math.min(Math.round(totalTableWidth * 0.48), Math.max(labelWidth, longestLabelPt));
-
-        const trailingLineGapPt = +(fontSize * 1.17 * (lineHeight - 1)).toFixed(2);
-        const singleLineHeightPt = +(fontSize * 1.17 * lineHeight).toFixed(2);
-
-        const availLabelW = Math.max(30, effectiveLabelWidth - padX * 2);
-        const availValueW = Math.max(50, totalTableWidth - effectiveLabelWidth - padX * 2);
-
-        const body = rows.map(([rawLabel, val]) => {
-            const cleanLabelStr = stripTrailingColon(extractPlainTextFromCell(rawLabel));
-            const valStr = extractPlainTextFromCell(val);
-            const isValBold = Boolean(val && typeof val === 'object' && val.bold);
-
-            const labelLines = estimateWrappedLineCount(cleanLabelStr, availLabelW, fontSize, true);
-            const valLines = estimateWrappedLineCount(valStr, availValueW, fontSize, isValBold);
-            const maxLines = Math.max(labelLines, valLines);
-
-            const labelExtraHalf = +(((maxLines - labelLines) * singleLineHeightPt) / 2).toFixed(2);
-            const valExtraHalf = +(((maxLines - valLines) * singleLineHeightPt) / 2).toFixed(2);
-
-            const labelTop = +(basePadY + labelExtraHalf + trailingLineGapPt * 0.45).toFixed(2);
-            const labelBottom = Math.max(1, +(basePadY + labelExtraHalf - trailingLineGapPt * 0.55).toFixed(2));
-
-            const valTop = +(basePadY + valExtraHalf + trailingLineGapPt * 0.45).toFixed(2);
-            const valBottom = Math.max(1, +(basePadY + valExtraHalf - trailingLineGapPt * 0.55).toFixed(2));
-
-            const labelCell = {
-                text: buildRichTextWithEmojis(cleanLabelStr),
-                bold: true,
-                fontSize,
-                lineHeight,
-                color: TOKENS.colors.textLabel,
-                verticalAlignment: 'middle',
-                margin: [padX, labelTop, padX, labelBottom]
-            };
-
-            const valueCell =
-                typeof val === 'string'
-                    ? {
-                          text: buildRichTextWithEmojis(val),
-                          fontSize,
-                          lineHeight,
-                          color: TOKENS.colors.textPrimary,
-                          verticalAlignment: 'middle',
-                          margin: [padX, valTop, padX, valBottom]
-                      }
-                    : {
-                          fontSize,
-                          lineHeight,
-                          color: TOKENS.colors.textPrimary,
-                          verticalAlignment: 'middle',
-                          ...val,
-                          margin: [padX, valTop, valBottom ? padX : padX, valBottom]
-                      };
-
-            return [labelCell, valueCell];
-        });
-
-        return {
-            fontSize,
-            table: {
-                widths: [effectiveLabelWidth, '*'],
-                body
-            },
-            layout: {
-                hLineWidth: () => TOKENS.table.borderWidth,
-                vLineWidth: () => TOKENS.table.borderWidth,
-                hLineColor: () => TOKENS.colors.tableBorder,
-                vLineColor: () => TOKENS.colors.tableBorder,
-                fillColor: (rowIndex) =>
-                    rowIndex % 2 === 0 ? TOKENS.colors.tableRowEven : TOKENS.colors.tableRowOdd,
-                paddingLeft: () => 0,
-                paddingRight: () => 0,
-                paddingTop: () => 0,
-                paddingBottom: () => 0
-            }
-        };
-    }
-
-    /**
-     * Zentrale Funktion für die Chat-Metadaten-Sektion (Seite 1) mit identischer Sortierung & Struktur
-     * für Kleinanzeigen und eBay:
-     * 1. Haupttabelle (Quelle, Erstellt mit, Anzeigen-ID, Nachrichten-ID, Anzeigentyp, Käufername, Verkäufername)
-     *    -> OHNE Anzeigentitel (da dieser bereits oben in der Titelbar steht!)
-     * 2. Nebeneinander: Links (Preis (Anzeige), Versand (Anzeige), Gesamtbetrag (Anzeige)) & Rechts (Preis, Versand, [Käuferschutz-Gebühr], Gesamtbetrag)
-     * 3. Untere Tabelle: [Zahlungsart nur bei Kleinanzeigen], Sendungsverfolgungsnummer
-     * 4. Exportiert / Erstellt am (ohne Doppelpunkt)
-     */
-    function buildUnifiedChatMetaSection(data, options = {}) {
-        const platform = resolvePlatform(options.platform || data.platform || data.website);
-        const isEbay = platform === 'ebay';
-
-        const topRows = [
-            [META_LABELS.SOURCE, data.website || data.platformLabel || 'n/a'],
-            [META_LABELS.CREATED_WITH, data.scriptVersion || data.createdBy || 'n/a'],
-            [META_LABELS.AD_ID, buildLinkCell(data.adId || 'n/a', data.adUrl || '')],
-            [META_LABELS.CONV_ID, buildLinkCell(data.conversationId || data.msgId || 'n/a', data.conversationUrl || data.msgUrl || '')],
-            [META_LABELS.AD_TYPE, data.adType || 'n/a'],
-            [META_LABELS.BUYER_NAME, buildLinkCell(data.buyerName || 'n/a', data.buyerUrl || '')],
-            [META_LABELS.SELLER_NAME, buildLinkCell(data.sellerName || 'n/a', data.sellerUrl || '')]
-        ];
-
-        const listedPrice = normalizeCurrencyToEUR(data.listedPrice || data.adPrice || 'n/a');
-        const listedShipping = normalizeCurrencyToEUR(data.listedShipping || data.adShipping || 'n/a');
-        const listedTotal = normalizeCurrencyToEUR(data.listedTotalAmount || data.adTotalAmount || 'n/a');
-
-        const agreedPrice = normalizeCurrencyToEUR(data.articlePrice || data.agreedPrice || 'n/a');
-        const agreedShipping = normalizeCurrencyToEUR(data.agreedShipping || data.shippingCost || 'n/a');
-        const buyerProtection = normalizeCurrencyToEUR(data.buyerProtectionFee || 'n/a');
-        const totalAmount = normalizeCurrencyToEUR(data.totalAmount || 'n/a');
-
-        const leftPriceRows = [
-            [META_LABELS.LISTED_PRICE, listedPrice],
-            [META_LABELS.LISTED_SHIPPING, listedShipping],
-            [META_LABELS.LISTED_TOTAL, buildTotalAmountCell(listedTotal)]
-        ];
-
-        const rightPriceRows = [
-            [META_LABELS.AGREED_PRICE, buildTotalAmountCell(agreedPrice)],
-            [META_LABELS.AGREED_SHIPPING, agreedShipping]
-        ];
-        if (!isEbay && data.paymentMethod === 'Direktzahlung' && buyerProtection !== 'n/a') {
-            rightPriceRows.push([META_LABELS.BUYER_PROTECTION, buyerProtection]);
-        }
-        rightPriceRows.push([META_LABELS.TOTAL_AMOUNT, buildTotalAmountCell(totalAmount)]);
-
-        const halfWidthPt = Math.floor((TOKENS.page.contentWidthPt - 14) / 2);
-
-        const bottomRows = [];
-        if (!isEbay) {
-            bottomRows.push([
-                META_LABELS.PAYMENT_METHOD,
-                { text: data.paymentMethod || 'n/a', bold: true }
-            ]);
-        }
-        bottomRows.push([
-            META_LABELS.TRACKING_ID,
-            data.trackingId && data.trackingId !== 'n/a'
-                ? buildLinkCell(data.trackingId, data.trackingUrl || '', data.trackingCarrier || '')
-                : 'n/a'
-        ]);
-
-        return {
-            stack: [
-                buildMetaTable(topRows, 155, TOKENS.page.contentWidthPt),
-                {
-                    columns: [
-                        { width: '*', ...buildMetaTable(leftPriceRows, 118, halfWidthPt) },
-                        { width: 14, text: '' },
-                        { width: '*', ...buildMetaTable(rightPriceRows, 115, halfWidthPt) }
-                    ],
-                    margin: [0, 6, 0, 6]
-                },
-                buildMetaTable(bottomRows, 155, TOKENS.page.contentWidthPt),
-                buildExportedAtNode(data.createdAtFormatted || data.exportedAt)
-            ],
-            margin: [0, 0, 0, 6]
-        };
-    }
-
-    /**
-     * Zentrale Funktion für die Artikel-/Anzeigendetails-Metadaten-Sektion (Seite 2) mit identischer Sortierung
-     * für Kleinanzeigen und eBay:
-     * - OHNE Anzeigentitel (steht bereits in der Titelbar darüber)
-     * - Mit Preis, Versand, Gesamtbetrag, Ort, Eingestellt am, Kategorie, dynamischen Artikelmerkmalen,
-     *   Verkäufername, Verkäufer Nutzer-ID, Verkäufer-Typ, Aktiv seit
-     */
-    function buildUnifiedAdMetaSection(data, options = {}) {
-        const listedPrice = normalizeCurrencyToEUR(data.listedPrice || data.price || 'n/a');
-        const listedShipping = normalizeCurrencyToEUR(data.listedShipping || data.shipping || 'n/a');
-        const listedTotal = normalizeCurrencyToEUR(data.listedTotalAmount || data.totalAmount || 'n/a');
-
-        const locationVal = data.location || 'n/a';
-        const mapsUrl =
-            locationVal !== 'n/a'
-                ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(locationVal)}`
-                : '';
-
-        const rows = [
-            [META_LABELS.SOURCE, data.website || data.platformLabel || 'n/a'],
-            [META_LABELS.CREATED_WITH, data.scriptVersion || data.createdBy || 'n/a'],
-            [META_LABELS.AD_ID, buildLinkCell(data.adId || 'n/a', data.adUrl || '')],
-            [META_LABELS.AD_TYPE, data.adType || 'n/a'],
-            [META_LABELS.AGREED_PRICE, buildTotalAmountCell(listedPrice)],
-            [META_LABELS.AGREED_SHIPPING, listedShipping],
-            [META_LABELS.TOTAL_AMOUNT, buildTotalAmountCell(listedTotal)],
-            [META_LABELS.LOCATION, buildLinkCell(locationVal, mapsUrl)],
-            [META_LABELS.CREATED_DATE, data.createdDateFormatted || data.createdAt || 'n/a'],
-            [META_LABELS.CATEGORY, data.category || 'n/a']
-        ];
-
-        if (Array.isArray(data.attributes)) {
-            for (const attr of data.attributes) {
-                if (Array.isArray(attr) && attr.length >= 2) {
-                    rows.push([stripTrailingColon(attr[0]), attr[1]]);
-                } else if (attr && typeof attr === 'object') {
-                    const k = stripTrailingColon(attr.name || attr.label || '');
-                    const v = attr.value || '';
-                    if (k && v) rows.push([k, v]);
-                }
-            }
-        }
-
-        rows.push(
-            [META_LABELS.SELLER_NAME, buildLinkCell(data.sellerName || 'n/a', data.sellerUrl || '')],
-            [META_LABELS.SELLER_ID, buildLinkCell(data.sellerId || 'n/a', data.sellerUrl || '')],
-            [META_LABELS.SELLER_TYPE, data.sellerType || 'n/a'],
-            [META_LABELS.SELLER_SINCE, data.sellerSinceFormatted || data.activeSince || 'n/a']
-        );
-
-        return {
-            stack: [
-                buildMetaTable(rows, 155, TOKENS.page.contentWidthPt),
-                buildExportedAtNode(data.createdAtFormatted || data.exportedAt)
-            ],
-            margin: [0, 0, 0, 8]
-        };
-    }
-
-    function formatExportTimestamp(date = new Date()) {
-        const dd = String(date.getDate()).padStart(2, '0');
-        const mm = String(date.getMonth() + 1).padStart(2, '0');
-        const yyyy = date.getFullYear();
-        const hh = String(date.getHours()).padStart(2, '0');
-        const min = String(date.getMinutes()).padStart(2, '0');
-        const sec = String(date.getSeconds()).padStart(2, '0');
-
-        const tzIana = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Berlin';
-        const tzShort =
-            new Intl.DateTimeFormat('de-DE', { timeZoneName: 'short' })
-                .formatToParts(date)
-                .find((part) => part.type === 'timeZoneName')?.value || 'MEZ';
-
-        return `${dd}.${mm}.${yyyy} ${hh}:${min}:${sec} ${tzShort} (${tzIana})`.trim();
-    }
-
-    function buildExportedAtNode(exportedAtStr, label = META_LABELS.EXPORTED_AT) {
-        const ts = exportedAtStr || formatExportTimestamp();
-        const cleanLabel = stripTrailingColon(label);
-        return {
-            text: `${cleanLabel} ${ts}`,
-            alignment: 'right',
-            fontSize: TOKENS.typography.exportTimestampSize,
-            bold: true,
-            color: TOKENS.colors.textExportedAt,
-            margin: [0, 4, 0, 10]
-        };
-    }
-
+    /** Abschnittsüberschrift. headlineLevel 1 => wird per pageBreakBefore nie allein unten auf einer Seite stehen gelassen. */
     function buildSectionHeader(titleText, platform = 'auto', options = {}) {
         const theme = getTheme(platform);
         return {
@@ -1294,9 +1156,157 @@
             bold: true,
             color: options.color || theme.sectionHeaderColor || TOKENS.colors.textDark,
             margin: options.margin || [0, 10, 0, 6],
-            unbreakable: true,
-            keepWithNext: true
+            headlineLevel: 1
         };
+    }
+
+    function formatExportTimestamp(date = new Date()) {
+        const p2 = (n) => String(n).padStart(2, '0');
+        const tzIana = (Intl.DateTimeFormat().resolvedOptions().timeZone) || 'Europe/Berlin';
+        const tzShort = new Intl.DateTimeFormat('de-DE', { timeZoneName: 'short' })
+            .formatToParts(date)
+            .find((part) => part.type === 'timeZoneName')?.value || 'MEZ';
+        return `${p2(date.getDate())}.${p2(date.getMonth() + 1)}.${date.getFullYear()} ${p2(date.getHours())}:${p2(date.getMinutes())}:${p2(date.getSeconds())} ${tzShort} (${tzIana})`;
+    }
+
+    function buildExportedAtNode(exportedAtStr) {
+        return {
+            text: `${META_LABELS.EXPORTED_AT} ${exportedAtStr || formatExportTimestamp()}`,
+            alignment: 'right',
+            fontSize: TOKENS.typography.exportTimestampSize,
+            bold: true,
+            color: TOKENS.colors.textExportedAt,
+            margin: [0, 4, 0, 10]
+        };
+    }
+
+    /* ==========================================================================
+     * META-SEKTIONEN (Nachrichtenverlauf & Anzeige)
+     * ========================================================================== */
+
+    const linkOrText = (value, url) => (isNa(value) ? 'n/a' : url ? buildLinkCell(value, url) : String(value));
+
+    /**
+     * Chat-Metadaten (Seite 1):
+     * Oben:  Anzeigen-ID, Nachrichten-ID, [Bestellnummer], Quelle, Erstellt mit, Kategorie, Anzeigentyp
+     * Mitte: links Preis/Versand/Gesamtbetrag (Anzeige) | rechts Preis/Versand/[Käuferschutz]/Gesamtbetrag
+     * Unten: [Zahlungsart], Sendungsverfolgungsnummer, Eingestellt am, Käufername, Verkäufername, Verkäufer-Typ, Aktiv seit
+     * Zebra-Streifen laufen über alle drei Tabellen durch.
+     */
+    function buildChatMetaSection(model) {
+        const meta = model.meta || {};
+        const caps = model.capabilities || {};
+        const width = TOKENS.page.contentWidthPt;
+
+        const topRows = [
+            [META_LABELS.AD_ID, linkOrText(meta.adId, meta.adUrl)],
+            [META_LABELS.CONV_ID, linkOrText(meta.conversationId, meta.conversationUrl)],
+            caps.orderId ? [META_LABELS.ORDER_ID, linkOrText(meta.orderId, meta.orderUrl)] : null,
+            [META_LABELS.SOURCE, model.platformLabel || 'n/a'],
+            [META_LABELS.CREATED_WITH, model.scriptLabel || 'n/a'],
+            [META_LABELS.CATEGORY, meta.category || 'n/a'],
+            [META_LABELS.AD_TYPE, meta.adType || 'n/a']
+        ];
+        const top = buildMetaTable(topRows, { startIndex: 0, width });
+        let idx = rowCountOf(top);
+
+        const listedTotal = sumMoney([meta.listedPrice, meta.listedShipping]);
+        const showFee = caps.buyerProtection && parseMoney(meta.buyerProtection).cents > 0;
+        const agreedTotal = sumMoney([meta.price, meta.shipping, showFee ? meta.buyerProtection : null].filter((x) => x !== null));
+        const decimals = moneyGroupNeedsDecimals([meta.listedPrice, meta.listedShipping, listedTotal, meta.price, meta.shipping, meta.buyerProtection, agreedTotal]);
+
+        const leftRows = [
+            [META_LABELS.LISTED_PRICE, buildMoneyCell(meta.listedPrice, decimals)],
+            [META_LABELS.LISTED_SHIPPING, buildMoneyCell(meta.listedShipping, decimals)],
+            [META_LABELS.LISTED_TOTAL, buildMoneyCell(listedTotal || 'n/a', decimals, true)]
+        ];
+        const rightRows = [
+            [META_LABELS.AGREED_PRICE, buildMoneyCell(meta.price, decimals)],
+            [META_LABELS.AGREED_SHIPPING, buildMoneyCell(meta.shipping, decimals)],
+            showFee ? [META_LABELS.BUYER_PROTECTION, buildMoneyCell(meta.buyerProtection, decimals)] : null,
+            [META_LABELS.TOTAL_AMOUNT, buildMoneyCell(agreedTotal || 'n/a', decimals, true)]
+        ].filter(Boolean);
+
+        const gap = TOKENS.table.priceBlockGapPt;
+        const halfWidth = Math.floor((width - gap) / 2);
+        const halfLabel = Math.round(halfWidth * 0.52);
+        const left = buildMetaTable(leftRows, { startIndex: idx, width: halfWidth, labelWidth: halfLabel });
+        const right = buildMetaTable(rightRows, { startIndex: idx, width: halfWidth, labelWidth: halfLabel });
+        idx += Math.max(rowCountOf(left), rowCountOf(right));
+
+        const bottomRows = [
+            caps.paymentMethod ? [META_LABELS.PAYMENT_METHOD, { text: meta.paymentMethod || 'n/a', bold: !isNa(meta.paymentMethod) }] : null,
+            [META_LABELS.TRACKING_ID, isNa(meta.trackingId) ? 'n/a' : buildLinkCell(meta.trackingId, meta.trackingUrl || '', meta.trackingCarrier || '')],
+            [META_LABELS.CREATED_DATE, formatDateWithRelativeAge(meta.createdAt, 'days')],
+            [META_LABELS.BUYER_NAME, linkOrText(meta.buyerName, meta.buyerUrl)],
+            [META_LABELS.SELLER_NAME, linkOrText(meta.sellerName, meta.sellerUrl)],
+            [META_LABELS.SELLER_TYPE, meta.sellerType || 'n/a'],
+            [META_LABELS.SELLER_SINCE, formatDateWithRelativeAge(meta.sellerActiveSince, 'activeSince')]
+        ];
+        const bottom = buildMetaTable(bottomRows, { startIndex: idx, width });
+
+        return {
+            stack: [
+                top,
+                { columns: [{ width: halfWidth, stack: [left] }, { width: gap, text: '' }, { width: halfWidth, stack: [right] }], columnGap: 0, margin: [0, 6, 0, 6] },
+                bottom,
+                buildExportedAtNode(model.exportedAt)
+            ]
+        };
+    }
+
+    /**
+     * Anzeigen-Metadaten (eigene Seite):
+     * Anzeigen-ID, Quelle, Erstellt mit, Kategorie, Anzeigentyp, Preis/Versand/Gesamtbetrag (Anzeige),
+     * Ort (nicht bei eigenen Artikeln), Eingestellt am, Verkäufername, Verkäufer-Typ, Aktiv seit
+     * Danach "Artikelmerkmale" (Streifen laufen weiter) und darunter der Export-Zeitstempel.
+     */
+    function buildAdMetaSection(model) {
+        const meta = model.meta || {};
+        const width = TOKENS.page.contentWidthPt;
+        const listedTotal = sumMoney([meta.listedPrice, meta.listedShipping]);
+        const decimals = moneyGroupNeedsDecimals([meta.listedPrice, meta.listedShipping, listedTotal]);
+        const isOwnAd = meta.role === 'SELLER';
+        const mapsUrl = !isNa(meta.location) ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(meta.location)}` : '';
+
+        const rows = [
+            [META_LABELS.AD_ID, linkOrText(meta.adId, meta.adUrl)],
+            [META_LABELS.SOURCE, model.platformLabel || 'n/a'],
+            [META_LABELS.CREATED_WITH, model.scriptLabel || 'n/a'],
+            [META_LABELS.CATEGORY, meta.category || 'n/a'],
+            [META_LABELS.AD_TYPE, meta.adType || 'n/a'],
+            [META_LABELS.LISTED_PRICE, buildMoneyCell(meta.listedPrice, decimals)],
+            [META_LABELS.LISTED_SHIPPING, buildMoneyCell(meta.listedShipping, decimals)],
+            [META_LABELS.LISTED_TOTAL, buildMoneyCell(listedTotal || 'n/a', decimals, true)],
+            isOwnAd ? null : [META_LABELS.LOCATION, linkOrText(meta.location, mapsUrl)],
+            [META_LABELS.CREATED_DATE, formatDateWithRelativeAge(meta.createdAt, 'days')],
+            [META_LABELS.SELLER_NAME, linkOrText(meta.sellerName, meta.sellerUrl)],
+            [META_LABELS.SELLER_TYPE, meta.sellerType || 'n/a'],
+            [META_LABELS.SELLER_SINCE, formatDateWithRelativeAge(meta.sellerActiveSince, 'activeSince')]
+        ];
+        const table = buildMetaTable(rows, { width });
+        const stack = [table];
+
+        const attrs = normalizeAttributes(model.attributes);
+        if (attrs.length > 0) {
+            const attrTable = buildMetaTable(attrs.map((a) => [a.name, a.value]), { startIndex: rowCountOf(table), width });
+            stack.push(keepTogether([buildSectionHeader('Artikelmerkmale', model.platform, { margin: [0, 12, 0, 6] }), attrTable], false));
+        }
+        stack.push(buildExportedAtNode(model.exportedAt));
+        return { stack };
+    }
+
+    function normalizeAttributes(list) {
+        const seen = new Set();
+        const out = [];
+        for (const a of Array.isArray(list) ? list : []) {
+            const name = stripTrailingColon(Array.isArray(a) ? a[0] : a && (a.name || a.label));
+            const value = String((Array.isArray(a) ? a[1] : a && a.value) || '').trim();
+            if (!name || !value || seen.has(name.toLowerCase())) continue;
+            seen.add(name.toLowerCase());
+            out.push({ name, value });
+        }
+        return out;
     }
 
     function buildDescriptionBlock(descriptionText, platform = 'auto') {
@@ -1305,22 +1315,13 @@
             fontSize: TOKENS.typography.bodyFontSize,
             lineHeight: TOKENS.page.defaultLineHeight,
             color: TOKENS.colors.textDesc,
-            maxWidthPt: TOKENS.page.contentWidthPt - 20
+            maxWidthPt: TOKENS.page.contentWidthPt - 20,
+            withLinks: true
         });
         return [
             buildSectionHeader('Beschreibung', platform, { margin: [0, 6, 0, 4] }),
             {
-                table: {
-                    widths: ['*'],
-                    body: [
-                        [
-                            {
-                                stack: Array.isArray(bodyNode.stack) ? bodyNode.stack : [bodyNode],
-                                margin: [8, 6, 8, 6]
-                            }
-                        ]
-                    ]
-                },
+                table: { widths: ['*'], body: [[{ stack: Array.isArray(bodyNode.stack) ? bodyNode.stack : [bodyNode], margin: [8, 6, 8, 6] }]] },
                 layout: {
                     hLineWidth: () => 0.5,
                     vLineWidth: () => 0.5,
@@ -1337,6 +1338,10 @@
         ];
     }
 
+    /* ==========================================================================
+     * ABGERUNDETE KARTEN (SVG-Kappen oben/unten + Tabellen-Mittelteil)
+     * ========================================================================== */
+
     function buildRoundedTopCapSvg(widthPt, radiusPt, fillColor, strokeColor = '') {
         const w = Math.max(40, Math.round(widthPt));
         const r = Math.min(12, Math.max(4, Math.round(radiusPt)));
@@ -1344,7 +1349,7 @@
         const h = r;
         const dFill = `M 0 ${h + 1} L 0 ${r} C 0 ${+(r - k).toFixed(2)}, ${+(r - k).toFixed(2)} 0, ${r} 0 L ${w - r} 0 C ${+(w - r + k).toFixed(2)} 0, ${w} ${+(r - k).toFixed(2)}, ${w} ${r} L ${w} ${h + 1} Z`;
         const strokeTag = strokeColor
-            ? `<path d="M 0 ${h} L 0 ${r} C 0 ${+(r - k).toFixed(2)}, ${+(r - k).toFixed(2)} 0.4, ${r} 0.4 L ${w - r} 0.4 C ${+(w - r + k).toFixed(2)} 0.4, ${w} ${+(r - k).toFixed(2)}, ${w} ${r} L ${w} ${h}" fill="none" stroke="${strokeColor}" stroke-width="0.8"/>`
+            ? `<path d="M 0.4 ${h} L 0.4 ${r} C 0.4 ${+(r - k).toFixed(2)}, ${+(r - k).toFixed(2)} 0.4, ${r} 0.4 L ${w - r} 0.4 C ${+(w - r + k).toFixed(2)} 0.4, ${w - 0.4} ${+(r - k).toFixed(2)}, ${w - 0.4} ${r} L ${w - 0.4} ${h}" fill="none" stroke="${strokeColor}" stroke-width="0.8"/>`
             : '';
         return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><path d="${dFill}" fill="${fillColor}"/>${strokeTag}</svg>`;
     }
@@ -1354,87 +1359,38 @@
         const r = Math.min(12, Math.max(4, Math.round(radiusPt)));
         const k = +(r * 0.55228475).toFixed(2);
         const h = r;
-
-        const rightEdge = roundRight
-            ? `L ${w} 0 C ${w} ${k}, ${+(w - r + k).toFixed(2)} ${h}, ${w - r} ${h}`
-            : `L ${w} 0 L ${w} ${h}`;
-
-        const leftEdge = roundLeft
-            ? `L ${r} ${h} C ${+(r - k).toFixed(2)} ${h}, 0 ${k}, 0 0`
-            : `L 0 ${h} L 0 0`;
-
+        const rightEdge = roundRight ? `L ${w} 0 C ${w} ${k}, ${+(w - r + k).toFixed(2)} ${h}, ${w - r} ${h}` : `L ${w} 0 L ${w} ${h}`;
+        const leftEdge = roundLeft ? `L ${r} ${h} C ${+(r - k).toFixed(2)} ${h}, 0 ${k}, 0 0` : `L 0 ${h} L 0 0`;
         const dFill = `M 0 -1 L ${w} -1 ${rightEdge} ${leftEdge} Z`;
-
         let strokeTag = '';
         if (strokeColor) {
+            const e = 0.4;
             const sRight = roundRight
-                ? `M ${w} 0 C ${w} ${k}, ${+(w - r + k).toFixed(2)} ${h - 0.4}, ${w - r} ${h - 0.4}`
-                : `M ${w} 0 L ${w} ${h - 0.4}`;
-            const sLeft = roundLeft
-                ? `L ${r} ${h - 0.4} C ${+(r - k).toFixed(2)} ${h - 0.4}, 0 ${k}, 0 0`
-                : `L 0 ${h - 0.4} L 0 0`;
+                ? `M ${w - e} 0 C ${w - e} ${k}, ${+(w - r + k).toFixed(2)} ${h - e}, ${w - r} ${h - e}`
+                : `M ${w - e} 0 L ${w - e} ${h - e}`;
+            const sLeft = roundLeft ? `L ${r} ${h - e} C ${+(r - k).toFixed(2)} ${h - e}, ${e} ${k}, ${e} 0` : `L ${e} ${h - e} L ${e} 0`;
             strokeTag = `<path d="${sRight} ${sLeft}" fill="none" stroke="${strokeColor}" stroke-width="0.8"/>`;
         }
-
         return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><path d="${dFill}" fill="${fillColor}"/>${strokeTag}</svg>`;
     }
 
-    function buildRoundedCardPdfNode({
-        widthPt,
-        radiusPt = 9,
-        fillColor,
-        strokeColor = '',
-        roundBottomLeft = true,
-        roundBottomRight = true,
-        bodyStack,
-        padX = 9
-    }) {
+    function buildRoundedCardPdfNode({ widthPt, radiusPt = 9, fillColor, strokeColor = '', roundBottomLeft = true, roundBottomRight = true, bodyStack, padX = 9 }) {
         const w = Math.round(widthPt);
         const hasStroke = Boolean(strokeColor);
-        const topSvg = buildRoundedTopCapSvg(w, radiusPt, fillColor, strokeColor);
-        const botSvg = buildRoundedBottomCapSvg(
-            w,
-            radiusPt,
-            fillColor,
-            roundBottomLeft,
-            roundBottomRight,
-            strokeColor
-        );
-
+        const fill = fillColor || '#ffffff';
         return {
             table: {
                 widths: [w],
                 body: [
-                    [
-                        {
-                            svg: topSvg,
-                            width: w,
-                            border: [false, false, false, false],
-                            margin: [0, 0, 0, -0.6]
-                        }
-                    ],
-                    [
-                        {
-                            stack: bodyStack,
-                            fillColor,
-                            border: [hasStroke, false, hasStroke, false],
-                            margin: [padX, 0, padX, 0]
-                        }
-                    ],
-                    [
-                        {
-                            svg: botSvg,
-                            width: w,
-                            border: [false, false, false, false],
-                            margin: [0, -0.6, 0, 0]
-                        }
-                    ]
+                    [{ svg: buildRoundedTopCapSvg(w, radiusPt, fill, strokeColor), width: w, border: [false, false, false, false], margin: [0, 0, 0, -0.6] }],
+                    [{ stack: bodyStack, fillColor: fill, border: [hasStroke, false, hasStroke, false], margin: [padX, 0, padX, 0] }],
+                    [{ svg: buildRoundedBottomCapSvg(w, radiusPt, fill, roundBottomLeft, roundBottomRight, strokeColor), width: w, border: [false, false, false, false], margin: [0, -0.6, 0, 0] }]
                 ]
             },
             layout: {
                 hLineWidth: () => 0,
                 vLineWidth: () => (hasStroke ? 0.8 : 0),
-                vLineColor: () => strokeColor || fillColor,
+                vLineColor: () => strokeColor || fill,
                 paddingLeft: () => 0,
                 paddingRight: () => 0,
                 paddingTop: () => 0,
@@ -1443,384 +1399,309 @@
         };
     }
 
-    function buildAvatarCircleSvg(initial, bgHex = TOKENS.colors.avatarBg, textHex = TOKENS.colors.avatarText) {
-        const cleanChar = String(initial || '?')
-            .trim()
-            .slice(0, 2)
-            .toUpperCase()
-            .replace(/[<>&"']/g, '');
-        return `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 26 26">
-            <circle cx="13" cy="13" r="13" fill="${bgHex}"/>
-            <text x="13" y="17" text-anchor="middle" font-family="Roboto, Arial, sans-serif" font-size="11" font-weight="bold" fill="${textHex}">${cleanChar || 'U'}</text>
-        </svg>`;
+    /* ==========================================================================
+     * CHAT-BAUSTEINE
+     * ========================================================================== */
+
+    function buildAvatarCircleSvg(initial, bgHex, textHex) {
+        const cleanChar = String(initial || '?').trim().slice(0, 1).toUpperCase().replace(/[<>&"']/g, '') || '?';
+        return `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 26 26"><circle cx="13" cy="13" r="13" fill="${bgHex}"/><text x="13" y="17.5" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="12" font-weight="bold" fill="${textHex}">${cleanChar}</text></svg>`;
     }
 
-    /**
-     * Erzeugt das Status-Icon (grünes Häkchen bei akzeptiertem Preisvorschlag, graue Uhr bei abgelaufenem Vorschlag) als SVG.
-     */
     function buildOfferStatusBadgeSvg(status) {
         if (status === 'accepted') {
-            return `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24">
-                <circle cx="12" cy="12" r="11" fill="#16a34a"/>
-                <path d="M7 12.5l3.2 3.2L17.5 8.5" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>`;
+            return '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="#16a34a"/><path d="M7 12.5l3.2 3.2L17.5 8.5" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
         }
-        if (status === 'expired' || status === 'declined') {
-            return `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24">
-                <circle cx="12" cy="12" r="11" fill="#6b7280"/>
-                <path d="M12 7v5l3 2" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>`;
+        if (status === 'expired') {
+            return '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="#707070"/><path d="M12 7v5l3 2" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        }
+        if (status === 'declined') {
+            return '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="#d50b0b"/><path d="M8 8l8 8M16 8l-8 8" fill="none" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round"/></svg>';
         }
         return '';
     }
 
+    const lineHeightPt = (fontSize, lh = TOKENS.page.defaultLineHeight) => fontSize * 1.17 * lh;
+
+    /** Bilder innerhalb einer Bubble: 1 Bild groß, mehrere als 2er-Raster. Liefert {nodes, heightPt, widthPt}. */
+    function buildBubbleImages(images, innerMaxW) {
+        const list = (images || []).filter((i) => i && i.dataUrl);
+        if (list.length === 0) return { nodes: [], heightPt: 0, widthPt: 0 };
+        const captionSize = TOKENS.typography.attachmentCaptionSize;
+        const caption = (img) => (img.filename ? { text: img.filename, fontSize: captionSize, italics: true, color: TOKENS.colors.textMuted, margin: [0, 1, 0, 3], alignment: 'center' } : null);
+        if (list.length === 1) {
+            const fit = Math.min(TOKENS.chat.singleImageFitPt, innerMaxW);
+            const img = list[0];
+            const scale = Math.min(fit / (img.width || fit), fit / (img.height || fit));
+            const h = Math.round((img.height || fit) * scale);
+            const w = Math.round((img.width || fit) * scale);
+            return { nodes: [{ image: img.dataUrl, fit: [fit, fit], margin: [0, 2, 0, 1] }, caption(img)].filter(Boolean), heightPt: h + 16, widthPt: w };
+        }
+        const cell = Math.min(TOKENS.chat.multiImageFitPt, Math.floor((innerMaxW - 6) / 2));
+        const nodes = [];
+        for (let i = 0; i < list.length; i += 2) {
+            const mk = (img) => (img ? { width: cell, stack: [{ image: img.dataUrl, fit: [cell, cell], alignment: 'center' }, caption(img)].filter(Boolean) } : { width: cell, text: '' });
+            nodes.push({ columns: [mk(list[i]), mk(list[i + 1])], columnGap: 6, margin: [0, 2, 0, 2] });
+        }
+        return { nodes, heightPt: Math.ceil(list.length / 2) * (cell + 16), widthPt: cell * 2 + 6 };
+    }
+
+    function buildLinkCardNode(card, innerW) {
+        const thumb = card.imageDataUrl ? { image: card.imageDataUrl, fit: [38, 38], width: 40 } : { width: 0, text: '' };
+        return {
+            table: {
+                widths: [innerW - 2],
+                body: [[{
+                    columns: [
+                        thumb,
+                        {
+                            width: '*',
+                            stack: [
+                                { text: buildRichTextWithEmojis(card.title || card.url), fontSize: 8.5, bold: true, color: TOKENS.colors.textDark },
+                                card.url ? { text: [linkRun(card.actionLabel || 'Artikel ansehen', card.url)], fontSize: 8, margin: [0, 2, 0, 0] } : { text: '' }
+                            ]
+                        }
+                    ],
+                    columnGap: 6,
+                    margin: [5, 5, 5, 5]
+                }]]
+            },
+            layout: {
+                hLineWidth: () => 0.6, vLineWidth: () => 0.6,
+                hLineColor: () => '#d1d5db', vLineColor: () => '#d1d5db',
+                fillColor: () => '#ffffff',
+                paddingLeft: () => 0, paddingRight: () => 0, paddingTop: () => 0, paddingBottom: () => 0
+            },
+            margin: [0, 4, 0, 2]
+        };
+    }
+
+    /** Übersetzungs-Block unter dem Text: Linie + Label + übersetzter Text. */
+    function buildTranslationNodes(msg, textColor, availW) {
+        const tr = msg.translation;
+        if (!tr || !tr.text) return { nodes: [], heightPt: 0 };
+        const label = tr.label || 'Übersetzung';
+        const nodes = [
+            { canvas: [{ type: 'line', x1: 0, y1: 0, x2: Math.max(30, availW), y2: 0, lineWidth: 0.5, lineColor: TOKENS.colors.translationRule }], margin: [0, 4, 0, 2] },
+            { text: label, fontSize: 7, italics: true, color: TOKENS.colors.textMuted, margin: [0, 0, 0, 1] },
+            buildParagraphNodeWithColorEmojis(tr.text, { fontSize: 9, color: textColor, maxWidthPt: availW, italics: true })
+        ];
+        const lines = estimateWrappedLineCount(tr.text, availW, 9, false);
+        return { nodes, heightPt: 16 + lines * lineHeightPt(9) };
+    }
+
+    /** Text-/Bild-Bubble (OUTBOUND/INBOUND) inkl. Bilder, Link-Karten und Übersetzung. */
     function buildChatBubbleNode(msg, platform = 'auto') {
         const theme = getTheme(platform);
-        const bTheme = theme.bubble;
-        const isOwn = Boolean(msg.isOwn || msg.type === 'OUTBOUND');
+        const b = theme.bubble;
+        const isOwn = Boolean(msg.isOwn);
+        const maxW = Math.round(TOKENS.page.contentWidthPt * TOKENS.chat.maxBubbleShare);
+        const fillColor = isOwn ? b.outboundFill : b.inboundFill;
+        const strokeColor = isOwn ? b.outboundBorder : b.inboundBorder;
+        const textColor = isOwn ? b.outboundText : b.inboundText;
+        const fs = TOKENS.typography.bodyFontSize;
 
-        const MAX_BUBBLE_WIDTH_PT = Math.round(TOKENS.page.contentWidthPt * 0.62);
-        const MIN_BUBBLE_WIDTH_PT = 78;
-        const radiusPt = 9;
-        const padX = 9;
+        const textForWidth = [msg.text, msg.translation && msg.translation.text].filter(Boolean).join('\n');
+        let longest = textForWidth ? measureTextWidthPt(textForWidth, fs, false) + (hasColorEmoji(textForWidth) ? 14 : 0) : 0;
+        const imgs = buildBubbleImages(msg.images, maxW - b.padX * 2);
+        longest = Math.max(longest, imgs.widthPt);
+        if (msg.translation && msg.translation.label) longest = Math.max(longest, measureTextWidthPt(msg.translation.label, 7, false));
+        if (msg.translationNote) longest = Math.max(longest, Math.min(240, measureTextWidthPt(msg.translationNote, 7, false)));
+        if (Array.isArray(msg.linkCards) && msg.linkCards.length) longest = Math.max(longest, 220);
 
-        const fillColor = isOwn ? bTheme.outboundFill : bTheme.inboundFill;
-        const strokeColor = isOwn ? bTheme.outboundBorder : bTheme.inboundBorder;
-        const textColor = isOwn ? bTheme.outboundText : bTheme.inboundText;
+        const widthPt = Math.min(maxW, Math.max(TOKENS.chat.minBubbleWidthPt, Math.ceil(longest + b.padX * 2 + 4)));
+        const innerW = Math.max(40, widthPt - b.padX * 2);
+        const stack = [];
+        let height = b.padY * 2;
 
-        const roundBottomLeft = bTheme.sharpCornerOnSendersSide ? isOwn : true;
-        const roundBottomRight = bTheme.sharpCornerOnSendersSide ? !isOwn : true;
-
-        const bubbleStack = [];
-        let longestContentPt = 0;
-        let estimatedBodyHeightPt = 0;
-
-        if (msg.offer) {
-            const offerTitleStr = cleanTextPreserveEmojis(msg.offer.title || 'Preisvorschlag');
-            const offerAmountStr = normalizeCurrencyToEUR(msg.offer.amount || '');
-            const offerStatus = msg.offer.status || '';
-
-            const offerTitleW = measureTextWidthPt(offerTitleStr, 9.5, true);
-            const offerAmountW = measureTextWidthPt(offerAmountStr, 11.5, true);
-            const badgeExtraW = offerStatus ? 22 : 0;
-            longestContentPt = Math.max(longestContentPt, offerTitleW + badgeExtraW + 16, offerAmountW + 16);
-
-            const innerAvailW = Math.min(MAX_BUBBLE_WIDTH_PT - padX * 2 - 16, Math.max(120, offerTitleW + badgeExtraW));
-            const titleLines = estimateWrappedLineCount(offerTitleStr, innerAvailW, 9.5, true);
-            estimatedBodyHeightPt += titleLines * 13 + (offerAmountStr && offerAmountStr !== 'n/a' ? 20 : 6);
-
-            const badgeSvg = buildOfferStatusBadgeSvg(offerStatus);
-            const titleRowNode = badgeSvg
-                ? {
-                      columns: [
-                          { svg: badgeSvg, width: 15, margin: [0, 0.5, 5, 0] },
-                          {
-                              width: '*',
-                              text: buildRichTextWithEmojis(offerTitleStr),
-                              bold: true,
-                              fontSize: 9.5,
-                              color: offerStatus === 'accepted' ? '#15803d' : '#111827'
-                          }
-                      ],
-                      columnGap: 4
-                  }
-                : {
-                      text: buildRichTextWithEmojis(offerTitleStr),
-                      bold: true,
-                      fontSize: 9.5,
-                      color: '#111827'
-                  };
-
-            const offerStack = [titleRowNode];
-            if (offerAmountStr && offerAmountStr !== 'n/a') {
-                offerStack.push({
-                    text: buildRichTextWithEmojis(offerAmountStr),
-                    bold: true,
-                    fontSize: 11.5,
-                    color: '#111827',
-                    margin: [badgeSvg ? 19 : 0, 3, 0, 0]
-                });
-            }
-
-            bubbleStack.push({
-                stack: offerStack,
-                margin: [0, 2, 0, msg.text ? 6 : 2]
-            });
+        if (imgs.nodes.length) {
+            stack.push(...imgs.nodes);
+            height += imgs.heightPt;
         }
-
-        const attachments = Array.isArray(msg.photos)
-            ? msg.photos
-            : Array.isArray(msg.images)
-              ? msg.images
-              : [];
-
-        if (attachments.length > 0) {
-            longestContentPt = Math.max(longestContentPt, 185);
-            for (const item of attachments) {
-                const imgDataUrl = item.dataUrl || '';
-                if (!imgDataUrl) continue;
-                const labelText =
-                    item.filename ||
-                    (item.index
-                        ? `Originalbild im PDF-Anhang: Chat_Foto_${String(item.index).padStart(2, '0')}.jpg`
-                        : '');
-
-                const imgW = item.width || 400;
-                const imgH = item.height || 300;
-                const scale = Math.min(175 / imgW, 175 / imgH);
-                estimatedBodyHeightPt += Math.round(imgH * scale) + 6;
-
-                bubbleStack.push({
-                    image: imgDataUrl,
-                    fit: [175, 175],
-                    margin: [0, 2, 0, 4]
-                });
-                if (labelText) {
-                    estimatedBodyHeightPt += 12;
-                    bubbleStack.push({
-                        text: buildRichTextWithEmojis(labelText),
-                        fontSize: 7.5,
-                        italics: true,
-                        color: TOKENS.colors.textMuted,
-                        margin: [0, 0, 0, 3]
-                    });
-                }
-            }
-        }
-
         if (msg.text) {
-            const textW = measureTextWidthPt(msg.text, TOKENS.typography.bodyFontSize, false);
-            longestContentPt = Math.max(longestContentPt, textW + (hasColorEmoji(msg.text) ? 14 : 0));
+            stack.push(buildParagraphNodeWithColorEmojis(msg.text, { fontSize: fs, color: textColor, maxWidthPt: innerW, withLinks: true }));
+            height += estimateWrappedLineCount(msg.text, innerW, fs, false) * lineHeightPt(fs);
+        } else if (msg.textUnavailableNote) {
+            stack.push({ text: msg.textUnavailableNote, fontSize: 8, italics: true, color: TOKENS.colors.textMuted });
+            height += lineHeightPt(8);
         }
-
-        const bubbleWidthPt = Math.min(
-            MAX_BUBBLE_WIDTH_PT,
-            Math.max(MIN_BUBBLE_WIDTH_PT, Math.ceil(longestContentPt + padX * 2 + 6))
-        );
-
-        if (msg.text) {
-            const availTextW = Math.max(40, bubbleWidthPt - padX * 2);
-            const msgBodyNode = buildParagraphNodeWithColorEmojis(msg.text, {
-                fontSize: TOKENS.typography.bodyFontSize,
-                lineHeight: TOKENS.page.defaultLineHeight,
-                color: textColor,
-                maxWidthPt: availTextW
-            });
-            bubbleStack.push(msgBodyNode);
-
-            const lineCount = estimateWrappedLineCount(
-                msg.text,
-                availTextW,
-                TOKENS.typography.bodyFontSize,
-                false
-            );
-            const singleLinePt = TOKENS.typography.bodyFontSize * 1.17 * TOKENS.page.defaultLineHeight;
-            estimatedBodyHeightPt += lineCount * singleLinePt;
+        const tr = buildTranslationNodes(msg, textColor, innerW);
+        if (tr.nodes.length) {
+            stack.push(...tr.nodes);
+            height += tr.heightPt;
         }
-
-        const bubbleHeightPt = Math.max(26, Math.round(estimatedBodyHeightPt + (radiusPt - 0.6) * 2));
+        if (msg.translationNote) {
+            stack.push({ text: msg.translationNote, fontSize: 7, italics: true, color: TOKENS.colors.textMuted, margin: [0, 3, 0, 0] });
+            height += estimateWrappedLineCount(msg.translationNote, innerW, 7, false) * lineHeightPt(7) + 3;
+        }
+        for (const card of msg.linkCards || []) {
+            stack.push(buildLinkCardNode(card, innerW));
+            height += 52;
+        }
+        if (stack.length === 0) stack.push({ text: ' ' });
 
         const bubbleNode = buildRoundedCardPdfNode({
-            widthPt: bubbleWidthPt,
-            radiusPt,
+            widthPt,
+            radiusPt: b.radiusPt,
             fillColor,
-            strokeColor: strokeColor || '',
-            roundBottomLeft,
-            roundBottomRight,
-            padX,
-            bodyStack: bubbleStack
+            strokeColor,
+            roundBottomLeft: b.sharpCornerOnSendersSide ? isOwn : true,
+            roundBottomRight: b.sharpCornerOnSendersSide ? !isOwn : true,
+            padX: b.padX,
+            bodyStack: [{ stack, margin: [0, Math.max(0, b.padY - b.radiusPt / 2), 0, Math.max(0, b.padY - b.radiusPt / 2)] }]
         });
-
-        return { bubbleNode, bubbleWidthPt, bubbleHeightPt, isOwn };
+        return { bubbleNode, widthPt, heightPt: Math.round(height + b.radiusPt), isOwn };
     }
 
-    function buildDateSeparatorNode(dateText) {
-        return {
-            text: buildRichTextWithEmojis(dateText),
-            alignment: 'center',
-            fontSize: TOKENS.typography.dateSeparatorSize,
-            bold: true,
-            color: TOKENS.colors.textMuted,
-            margin: [0, 10, 0, 6],
-            unbreakable: true
-        };
+    /** Preisvorschlag als umrandete Bubble (eBay-Optik): Status-Icon + Titel, darunter großer Betrag. */
+    function buildOfferBubbleNode(msg, platform = 'auto') {
+        const theme = getTheme(platform);
+        const o = theme.offer;
+        const isOwn = Boolean(msg.isOwn);
+        const offer = msg.offer || {};
+        const title = cleanTextPreserveEmojis(offer.title || 'Preisvorschlag');
+        const amount = isNa(offer.amount) ? '' : formatMoneyText(offer.amount, moneyGroupNeedsDecimals([offer.amount]));
+        const badge = buildOfferStatusBadgeSvg(offer.status);
+        const titleW = measureTextWidthPt(title, o.titleSize, true) + (badge ? 20 : 0);
+        const amountW = measureTextWidthPt(amount, o.amountSize, true);
+        const widthPt = Math.min(Math.round(TOKENS.page.contentWidthPt * TOKENS.chat.maxBubbleShare), Math.max(150, Math.ceil(Math.max(titleW, amountW) + 28)));
+
+        const titleNode = badge
+            ? { columns: [{ svg: badge, width: 12, margin: [0, 0.5, 0, 0] }, { width: '*', text: title, bold: true, fontSize: o.titleSize, color: '#000000' }], columnGap: 5 }
+            : { text: title, bold: true, fontSize: o.titleSize, color: '#000000' };
+        const stack = [titleNode];
+        if (amount) stack.push({ text: amount, bold: true, fontSize: o.amountSize, color: '#000000', margin: [0, 3, 0, 0] });
+        if (msg.text) stack.push({ text: buildRichTextWithLinks(msg.text), fontSize: 9, color: TOKENS.colors.textDesc, margin: [0, 4, 0, 0] });
+
+        const bubbleNode = buildRoundedCardPdfNode({
+            widthPt,
+            radiusPt: 12,
+            fillColor: o.fill,
+            strokeColor: isOwn ? o.ownBorder : o.partnerBorder,
+            padX: 12,
+            bodyStack: [{ stack, margin: [0, 2, 0, 2] }]
+        });
+        return { bubbleNode, widthPt, heightPt: 24 + lineHeightPt(o.titleSize) + (amount ? lineHeightPt(o.amountSize) : 0), isOwn };
     }
 
-    function buildMessageSubtextNode(text, isRightAligned = false, customMargin = null) {
-        return {
-            text: buildRichTextWithEmojis(text),
-            fontSize: TOKENS.typography.messageTimestampSize,
-            color: TOKENS.colors.textTimestamp,
-            alignment: isRightAligned ? 'right' : 'left',
-            margin: customMargin || [2, 2, 2, 0]
-        };
+    function buildMessageSubtextNode(text, alignment = 'left', margin = [2, 2, 2, 0]) {
+        return { text: buildRichTextWithEmojis(text), fontSize: TOKENS.typography.messageTimestampSize, color: TOKENS.colors.textTimestamp, alignment, margin };
     }
 
+    /** Eine Chat-Zeile (Bubble + Avatar + Zeitstempel) – unzerbrechlich. */
     function buildChatMessageRow(msg, options = {}) {
         const platform = options.platform || 'auto';
-        const { bubbleNode, bubbleWidthPt, bubbleHeightPt, isOwn } = buildChatBubbleNode(msg, platform);
+        const theme = getTheme(platform);
+        const built = msg.kind === 'offer' ? buildOfferBubbleNode(msg, platform) : buildChatBubbleNode(msg, platform);
+        const { bubbleNode, widthPt, heightPt, isOwn } = built;
+        const content = TOKENS.page.contentWidthPt;
 
-        const formattedTimestamp = normalizeMessageTimestamp(
-            msg.timestamp,
-            msg.date || options.fallbackDate || ''
-        );
-
-        const subtextStack = [];
+        const sub = [];
         if (msg.warningText) {
-            subtextStack.push({
-                text: buildRichTextWithEmojis(msg.warningText),
-                fontSize: 8,
-                bold: true,
-                color: TOKENS.colors.textWarning,
-                alignment: isOwn ? 'right' : 'left',
-                margin: [2, 2, 2, 0]
-            });
+            sub.push({ text: buildRichTextWithEmojis(msg.warningText), fontSize: 8, bold: true, color: TOKENS.colors.textWarning, alignment: isOwn ? 'right' : 'left', margin: [2, 2, 2, 0] });
         }
-        if (formattedTimestamp) {
-            subtextStack.push(buildMessageSubtextNode(formattedTimestamp, isOwn, [2, 2, 2, 0]));
-        }
+        const ts = normalizeMessageTimestamp(msg.timestamp, msg.date || options.fallbackDate || '');
+        const tsLabel = [ts, msg.subtext].filter(Boolean).join(' · ');
+        if (tsLabel) sub.push(buildMessageSubtextNode(tsLabel, isOwn ? 'right' : 'left'));
 
         if (isOwn) {
-            const leftSpacer = Math.max(0, TOKENS.page.contentWidthPt - bubbleWidthPt);
             return {
-                columns: [
-                    { width: leftSpacer, text: '' },
-                    {
-                        width: bubbleWidthPt,
-                        stack: [bubbleNode, ...subtextStack]
-                    }
-                ],
+                columns: [{ width: Math.max(0, content - widthPt), text: '' }, { width: widthPt, stack: [bubbleNode, ...sub] }],
                 columnGap: 0,
                 unbreakable: true,
                 margin: [0, 2, 0, 6]
             };
         }
 
-        const AVATAR_SIZE_PT = 26;
-        const AVATAR_COL_WIDTH_PT = 32;
-        const avatarTopMarginPt = Math.max(0, Math.round(bubbleHeightPt - AVATAR_SIZE_PT));
-
-        let avatarCol = { width: AVATAR_COL_WIDTH_PT, text: '' };
-        const fallbackInitial = msg.avatarInitial || options.partnerFallbackInitial || 'U';
-        const resolvedAvatarSvg =
-            options.avatarSvg ||
-            (!options.avatarDataUrl ? buildAvatarCircleSvg(fallbackInitial) : null);
-
-        if (options.avatarDataUrl) {
-            avatarCol = {
-                width: AVATAR_COL_WIDTH_PT,
-                image: options.avatarDataUrl,
-                fit: [AVATAR_SIZE_PT, AVATAR_SIZE_PT],
-                alignment: 'left',
-                margin: [0, avatarTopMarginPt, 6, 0]
-            };
-        } else if (resolvedAvatarSvg) {
-            avatarCol = {
-                width: AVATAR_COL_WIDTH_PT,
-                stack: [
-                    {
-                        svg: resolvedAvatarSvg,
-                        width: AVATAR_SIZE_PT,
-                        margin: [0, avatarTopMarginPt, 6, 0]
-                    }
-                ]
-            };
-        }
-
-        const rightSpacer = Math.max(
-            0,
-            TOKENS.page.contentWidthPt - AVATAR_COL_WIDTH_PT - bubbleWidthPt
-        );
-
-        const rowStack = [
-            {
-                columns: [
-                    avatarCol,
-                    { width: bubbleWidthPt, stack: [bubbleNode] },
-                    { width: rightSpacer, text: '' }
-                ],
-                columnGap: 0
-            }
-        ];
-
-        if (subtextStack.length > 0) {
-            rowStack.push({
-                columns: [
-                    { width: AVATAR_COL_WIDTH_PT, text: '' },
-                    { width: bubbleWidthPt, stack: subtextStack },
-                    { width: rightSpacer, text: '' }
-                ],
-                columnGap: 0
-            });
-        }
-
-        return {
-            stack: rowStack,
-            unbreakable: true,
-            margin: [0, 2, 0, 6]
-        };
+        const avatar = options.avatar || {};
+        const size = TOKENS.chat.avatarSizePt;
+        const colW = TOKENS.chat.avatarColWidthPt;
+        const top = Math.max(0, Math.round(heightPt - size));
+        const avatarCol = avatar.dataUrl
+            ? { width: colW, image: avatar.dataUrl, fit: [size, size], margin: [0, top, 0, 0] }
+            : { width: colW, stack: [{ svg: buildAvatarCircleSvg(avatar.letter || 'U', avatar.bg || theme.avatar.bg, avatar.fg || theme.avatar.fg), width: size, margin: [0, top, 0, 0] }] };
+        const rest = Math.max(0, content - colW - widthPt);
+        const rowStack = [{ columns: [avatarCol, { width: widthPt, stack: [bubbleNode] }, { width: rest, text: '' }], columnGap: 0 }];
+        if (sub.length) rowStack.push({ columns: [{ width: colW, text: '' }, { width: widthPt, stack: sub }, { width: rest, text: '' }], columnGap: 0 });
+        return { stack: rowStack, unbreakable: true, margin: [0, 2, 0, 6] };
     }
 
-    function buildSystemMessageNode(msg, fallbackDate = '') {
-        const sysStack = [
-            {
-                text: buildRichTextWithEmojis(normalizeCurrencyToEUR(msg.title || 'Systemnachricht')),
-                bold: true,
-                fontSize: 10,
-                color: '#111827',
-                margin: [0, 0, 0, 2]
-            }
-        ];
-        if (msg.breakdown) {
-            sysStack.push({
-                text: buildRichTextWithEmojis(normalizeCurrencyToEUR(msg.breakdown)),
-                fontSize: 9,
-                bold: true,
-                color: '#1d4b00',
-                margin: [0, 0, 0, 3]
+    /**
+     * Systemkarte (Kleinanzeigen "Bezahlung angefragt / Anfrage erhalten / Artikel bezahlt", eBay-Hinweise):
+     * Titel, optional großer Betrag, optional Aufschlüsselung, Trennlinie, Text. Darunter "Datum · Automatische Nachricht".
+     */
+    function buildSystemMessageNode(msg, options = {}) {
+        const theme = getTheme(options.platform);
+        const c = theme.card;
+        const isNotice = msg.kind === 'notice';
+        const width = TOKENS.page.contentWidthPt;
+        const inner = width - 24;
+        const stack = [];
+        const titleRow = msg.status ? buildOfferStatusBadgeSvg(msg.status) : '';
+        const titleText = { text: buildRichTextWithEmojis(msg.title || (isNotice ? 'Hinweis' : 'Systemnachricht')), bold: true, fontSize: c.eyebrowSize, color: '#0c0c0b' };
+        stack.push(titleRow ? { columns: [{ svg: titleRow, width: 12, margin: [0, 1, 0, 0] }, { width: '*', ...titleText }], columnGap: 5 } : titleText);
+        if (!isNa(msg.amount) && msg.amount) {
+            stack.push({ text: formatMoneyText(msg.amount, moneyGroupNeedsDecimals([msg.amount])), bold: true, fontSize: c.amountSize, color: '#0c0c0b', margin: [0, 4, 0, 0] });
+        }
+        if (Array.isArray(msg.breakdown) && msg.breakdown.length) {
+            const dec = moneyGroupNeedsDecimals(msg.breakdown.map((r) => r.value));
+            stack.push({
+                table: { widths: ['*', 'auto'], body: msg.breakdown.map((r) => [{ text: r.label, fontSize: 9, color: '#33322e' }, { text: formatMoneyText(r.value, dec), fontSize: 9, alignment: 'right', color: '#33322e' }]) },
+                layout: 'noBorders',
+                margin: [0, 4, 0, 0]
             });
         }
-        if (msg.text) {
-            sysStack.push(
-                buildParagraphNodeWithColorEmojis(msg.text, {
-                    fontSize: 9,
-                    color: '#374151',
-                    maxWidthPt: TOKENS.page.contentWidthPt - 24
-                })
-            );
+        if (msg.text || msg.runs) {
+            if (!isNotice) stack.push({ canvas: [{ type: 'line', x1: 0, y1: 0, x2: inner, y2: 0, lineWidth: 0.5, lineColor: '#e0deda' }], margin: [0, 7, 0, 5] });
+            stack.push(msg.runs
+                ? { text: buildRunsNode(msg.runs), fontSize: 9, color: '#33322e', lineHeight: 1.25 }
+                : buildParagraphNodeWithColorEmojis(msg.text, { fontSize: 9, color: '#33322e', maxWidthPt: inner, withLinks: true }));
         }
-
-        const sysCard = buildRoundedCardPdfNode({
-            widthPt: TOKENS.page.contentWidthPt,
-            radiusPt: 8,
-            fillColor: '#ffffff',
-            strokeColor: '#d1d5db',
-            roundBottomLeft: true,
-            roundBottomRight: true,
-            padX: 10,
-            bodyStack: sysStack
+        const card = buildRoundedCardPdfNode({
+            widthPt: width,
+            radiusPt: c.radiusPt,
+            fillColor: isNotice ? TOKENS.colors.noticeFill : c.fill,
+            strokeColor: isNotice ? TOKENS.colors.noticeBorder : c.border,
+            padX: 12,
+            bodyStack: [{ stack, margin: [0, 2, 0, 2] }]
         });
-
-        const formattedTs = normalizeMessageTimestamp(msg.timestamp, msg.date || fallbackDate);
-        const sysWrapperStack = [sysCard];
-        if (formattedTs) {
-            sysWrapperStack.push(
-                buildMessageSubtextNode(`${formattedTs} · Automatische Nachricht`, true, [0, 2, 2, 0])
-            );
-        }
-
-        return {
-            stack: sysWrapperStack,
-            unbreakable: true,
-            margin: [0, 3, 0, 7]
-        };
+        const ts = normalizeMessageTimestamp(msg.timestamp, msg.date || options.fallbackDate || '');
+        const footer = [ts, 'Automatische Nachricht'].filter(Boolean).join(' · ');
+        return { stack: [card, buildMessageSubtextNode(footer, 'right', [0, 2, 2, 0])], unbreakable: true, margin: [0, 3, 0, 8] };
     }
 
-    function buildEndOfChatNode(text = '\u2E3B Ende des Nachrichtenverlaufs \u2E3B') {
-        const normalized = String(text || '\u2E3B Ende des Nachrichtenverlaufs \u2E3B')
-            .replace(/---+/g, '\u2E3B');
+    /**
+     * Sicherheitshinweis über dem Chat.
+     * Kleinanzeigen: Logo, "Über <Partner>", "Aktiv seit …", grüne Pille mit klickbaren Links.
+     * eBay: Hinweistext mit klickbaren Links.
+     */
+    function buildSecurityNoticeNode(notice, platform) {
+        if (!notice) return null;
+        const theme = getTheme(platform);
+        const width = TOKENS.page.contentWidthPt;
+        const stack = [];
+        if (notice.logoDataUrl) stack.push({ image: notice.logoDataUrl, width: notice.logoWidthPt || 92, margin: [0, 0, 0, 6] });
+        if (notice.title) stack.push({ text: notice.title, bold: true, fontSize: 10, color: '#0c0c0b' });
+        if (notice.subtitle) stack.push({ text: notice.subtitle, fontSize: 8.5, color: TOKENS.colors.textTimestamp, margin: [0, 2, 0, 0] });
+        if (notice.runs && notice.runs.length) {
+            const textNode = { text: buildRunsNode(notice.runs), fontSize: 8.5, color: theme.securityPill.text, lineHeight: 1.25 };
+            stack.push({
+                table: { widths: ['*'], body: [[{ ...textNode, fillColor: theme.securityPill.fill, margin: [7, 5, 7, 5] }]] },
+                layout: 'noBorders',
+                margin: [0, stack.length ? 6 : 0, 0, 0]
+            });
+        }
+        const card = buildRoundedCardPdfNode({ widthPt: width, radiusPt: theme.card.radiusPt, fillColor: '#ffffff', strokeColor: theme.card.border, padX: 10, bodyStack: [{ stack, margin: [0, 2, 0, 2] }] });
+        return { stack: [card, buildMessageSubtextNode('Automatische Nachricht', 'right', [0, 2, 2, 0])], unbreakable: true, margin: [0, 2, 0, 10] };
+    }
+
+    function buildDateSeparatorNode(dateText) {
+        return { text: buildRichTextWithEmojis(dateText), alignment: 'center', fontSize: TOKENS.typography.dateSeparatorSize, bold: true, color: TOKENS.colors.textMuted, margin: [0, 8, 0, 6] };
+    }
+
+    function buildEndOfChatNode() {
         return {
-            text: buildRichTextWithEmojis(normalized),
+            text: buildRichTextWithEmojis('\u2E3B Ende des Nachrichtenverlaufs \u2E3B'),
             alignment: 'center',
             fontSize: TOKENS.typography.endOfChatSize,
             bold: true,
@@ -1829,66 +1710,108 @@
         };
     }
 
+    /** Fasst Knoten zu einem unzerbrechlichen Block zusammen (z. B. Datum + erste Nachricht, Überschrift + erste Bildzeile). */
+    function keepTogether(nodes, unbreakable = true) {
+        const flat = nodes.filter(Boolean);
+        return unbreakable ? { stack: flat, unbreakable: true } : { stack: flat };
+    }
+
+    /**
+     * Nachrichtenverlauf. Das Datum wird immer zusammen mit der ersten Nachricht des Tages gesetzt
+     * (kein Seitenumbruch zwischen Datum und Bubble).
+     */
     function buildChatHistoryNodes(messages, options = {}) {
         const platform = options.platform || 'auto';
-        const partnerAvatarDataUrl = options.partnerAvatarDataUrl || null;
-        const partnerFallbackInitial = options.partnerFallbackInitial || 'U';
-        const includeEndOfChat = options.includeEndOfChat !== false;
-
         const nodes = [];
-        let lastDateGroupLabel = '';
-        let lastKnownDateStr = '';
+        let lastGroup = '';
+        let lastDate = '';
+        let pendingSeparator = null;
 
-        if (Array.isArray(messages)) {
-            for (const msg of messages) {
-                if (msg.date && /\d/.test(msg.date)) {
-                    lastKnownDateStr = msg.date;
-                }
+        for (const msg of Array.isArray(messages) ? messages : []) {
+            if (msg.date && /\d/.test(msg.date)) lastDate = msg.date;
+            const group = msg.dateGroupLabel || formatDateGroupLabel(msg.timestamp || msg.date, lastDate);
+            if (group && group !== lastGroup) {
+                lastGroup = group;
+                pendingSeparator = buildDateSeparatorNode(group);
+            }
+            const parsed = parseAnyDateParts(msg.timestamp || msg.date, lastDate);
+            if (parsed && parsed.hasDate) lastDate = parsed.numericDate;
 
-                const groupLabel =
-                    msg.dateGroupLabel ||
-                    formatDateGroupLabel(msg.timestamp || msg.date, lastKnownDateStr);
-
-                if (groupLabel && groupLabel !== lastDateGroupLabel) {
-                    lastDateGroupLabel = groupLabel;
-                    nodes.push(buildDateSeparatorNode(groupLabel));
-                }
-
-                const parsedForFallback = parseAnyDateParts(msg.timestamp || msg.date, lastKnownDateStr);
-                if (parsedForFallback && parsedForFallback.hasDate) {
-                    lastKnownDateStr = parsedForFallback.numericDate;
-                }
-
-                if (msg.type === 'SYSTEM') {
-                    nodes.push(buildSystemMessageNode(msg, lastKnownDateStr));
-                    continue;
-                }
-
-                const isOwn = Boolean(msg.isOwn || msg.type === 'OUTBOUND');
-                const avatarSvg =
-                    !isOwn && !partnerAvatarDataUrl
-                        ? options.avatarSvg ||
-                          buildAvatarCircleSvg(msg.avatarInitial || partnerFallbackInitial)
-                        : null;
-
-                nodes.push(
-                    buildChatMessageRow(msg, {
-                        platform,
-                        avatarDataUrl: !isOwn ? partnerAvatarDataUrl : null,
-                        avatarSvg,
-                        partnerFallbackInitial,
-                        fallbackDate: lastKnownDateStr
-                    })
-                );
+            let node;
+            if (msg.kind === 'system' || msg.kind === 'notice') {
+                node = buildSystemMessageNode(msg, { platform, fallbackDate: lastDate });
+            } else {
+                node = buildChatMessageRow(msg, { platform, avatar: options.partnerAvatar, fallbackDate: lastDate });
+            }
+            if (pendingSeparator) {
+                nodes.push(keepTogether([pendingSeparator, node]));
+                pendingSeparator = null;
+            } else {
+                nodes.push(node);
             }
         }
-
-        if (includeEndOfChat) {
-            nodes.push(buildEndOfChatNode());
-        }
-
+        if (options.includeEndOfChat !== false) nodes.push(buildEndOfChatNode());
         ensurePdfMakeEmojiFontRegistered();
         return nodes;
+    }
+
+    /* ==========================================================================
+     * GALERIE
+     * ========================================================================== */
+
+    function normalizeGalleryImageDataUrl(sourceDataUrl) {
+        return new Promise((resolve) => {
+            if (!sourceDataUrl) {
+                resolve('');
+                return;
+            }
+            const img = new Image();
+            img.onload = () => {
+                const targetW = TOKENS.gallery.canvasTargetWidthPx;
+                const targetH = TOKENS.gallery.canvasTargetHeightPx;
+                const srcW = img.naturalWidth || img.width || targetW;
+                const srcH = img.naturalHeight || img.height || targetH;
+                const canvas = document.createElement('canvas');
+                canvas.width = targetW;
+                canvas.height = targetH;
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = '#FFFFFF';
+                ctx.fillRect(0, 0, targetW, targetH);
+                const scale = Math.min(targetW / srcW, targetH / srcH);
+                const drawW = Math.round(srcW * scale);
+                const drawH = Math.round(srcH * scale);
+                ctx.drawImage(img, 0, 0, srcW, srcH, Math.round((targetW - drawW) / 2), Math.round((targetH - drawH) / 2), drawW, drawH);
+                resolve(canvas.toDataURL('image/jpeg', 0.92));
+            };
+            img.onerror = () => resolve(sourceDataUrl);
+            img.src = sourceDataUrl;
+        });
+    }
+
+    /** 2-spaltige Galerie, Bildunterschrift nur "n/m" zentriert. Überschrift bleibt mit der ersten Bildzeile zusammen. */
+    function buildTwoColumnGallery(images, platform = 'auto', sectionTitle = 'Bilder') {
+        const list = (Array.isArray(images) ? images : []).map((i) => (typeof i === 'string' ? i : i && (i.galleryDataUrl || i.dataUrl))).filter(Boolean);
+        if (list.length === 0) return [];
+        const total = list.length;
+        const header = buildSectionHeader(`${sectionTitle} (${total})`, platform, { margin: [0, 10, 0, 6] });
+        delete header.headlineLevel;
+        const cell = (dataUrl, n) => ({
+            width: '*',
+            stack: [
+                { image: dataUrl, fit: [TOKENS.gallery.boxWidthPt, TOKENS.gallery.boxHeightPt], alignment: 'center' },
+                { text: `${n}/${total}`, fontSize: TOKENS.typography.galleryCaptionSize, bold: true, color: TOKENS.colors.textMuted, alignment: 'center', margin: [0, 4, 0, 8] }
+            ]
+        });
+        const rows = [];
+        for (let i = 0; i < total; i += 2) {
+            rows.push({
+                columns: [cell(list[i], i + 1), i + 1 < total ? cell(list[i + 1], i + 2) : { width: '*', text: '' }],
+                columnGap: TOKENS.gallery.columnGapPt,
+                margin: [0, 4, 0, 6],
+                unbreakable: true
+            });
+        }
+        return [keepTogether([header, rows[0]]), ...rows.slice(1)];
     }
 
     function buildPageFooter() {
@@ -1901,140 +1824,78 @@
         });
     }
 
-    function normalizeGalleryImageDataUrl(sourceDataUrl, mode = TOKENS.gallery.cropMode) {
-        return new Promise((resolve) => {
-            if (!sourceDataUrl) {
-                resolve('');
-                return;
-            }
-            const img = new Image();
-            img.crossOrigin = 'anonymous';
-            img.onload = () => {
-                const targetW = TOKENS.gallery.canvasTargetWidthPx;
-                const targetH = TOKENS.gallery.canvasTargetHeightPx;
-                const srcW = img.naturalWidth || img.width || targetW;
-                const srcH = img.naturalHeight || img.height || targetH;
-
-                const canvas = document.createElement('canvas');
-                canvas.width = targetW;
-                canvas.height = targetH;
-                const ctx = canvas.getContext('2d');
-                ctx.fillStyle = '#FFFFFF';
-                ctx.fillRect(0, 0, targetW, targetH);
-
-                if (mode === 'cover') {
-                    const scale = Math.max(targetW / srcW, targetH / srcH);
-                    const cropW = targetW / scale;
-                    const cropH = targetH / scale;
-                    const sx = (srcW - cropW) / 2;
-                    const sy = (srcH - cropH) / 2;
-                    ctx.drawImage(img, sx, sy, cropW, cropH, 0, 0, targetW, targetH);
-                } else {
-                    const scale = Math.min(targetW / srcW, targetH / srcH);
-                    const drawW = Math.round(srcW * scale);
-                    const drawH = Math.round(srcH * scale);
-                    const dx = Math.round((targetW - drawW) / 2);
-                    const dy = Math.round((targetH - drawH) / 2);
-                    ctx.drawImage(img, 0, 0, srcW, srcH, dx, dy, drawW, drawH);
-                }
-
-                resolve(canvas.toDataURL('image/jpeg', 0.94));
-            };
-            img.onerror = () => resolve(sourceDataUrl);
-            img.src = sourceDataUrl;
-        });
+    /** "Keep with next": Überschriften (headlineLevel 1) nie als letztes Element einer Seite. */
+    function pageBreakBeforeKeepWithNext(currentNode, followingNodesOnPage) {
+        return currentNode.headlineLevel === 1 && followingNodesOnPage.length === 0;
     }
 
-    function buildTwoColumnGallery(images, platform = 'auto', sectionTitlePrefix = 'Bilder') {
-        if (!Array.isArray(images) || images.length === 0) return [];
-        const total = images.length;
-        const rows = [
-            buildSectionHeader(`${sectionTitlePrefix} (${total})`, platform, {
-                margin: [0, 10, 0, 6]
-            })
-        ];
+    /* ==========================================================================
+     * GESAMTDOKUMENT
+     * ========================================================================== */
 
-        const getImgDataUrl = (item) => (typeof item === 'string' ? item : item?.dataUrl || '');
+    function composeTitle(meta) {
+        const title = meta.adTitle || 'Unbekannter Artikel';
+        return meta.adStatus ? `${meta.adStatus} \u2022 ${title}` : title;
+    }
 
-        for (let i = 0; i < total; i += 2) {
-            const leftUrl = getImgDataUrl(images[i]);
-            const rightUrl = i + 1 < total ? getImgDataUrl(images[i + 1]) : '';
+    /**
+     * Baut die pdfmake-docDefinition aus dem einheitlichen Datenmodell.
+     * Reihenfolge: Titel -> Chat-Meta -> Sicherheitshinweis -> Chat -> Ende -> Chat-Bilder
+     *              -> (neue Seite) Titel -> Anzeigen-Meta -> Artikelmerkmale -> Export-Zeitstempel -> Beschreibung -> Anzeigen-Bilder
+     */
+    function buildExportDocument(model) {
+        const meta = model.meta || {};
+        const platform = resolvePlatform(model.platform);
+        const title = composeTitle(meta);
+        const content = [buildTitleBar(title, platform), buildChatMetaSection(model)];
 
-            const buildCell = (dataUrl, indexOneBased) => ({
-                width: '*',
-                stack: [
-                    {
-                        image: dataUrl,
-                        fit: [TOKENS.gallery.boxWidthPt, TOKENS.gallery.boxHeightPt],
-                        alignment: 'center'
-                    },
-                    {
-                        text: `${indexOneBased}/${total}`,
-                        fontSize: TOKENS.typography.galleryCaptionSize,
-                        bold: true,
-                        color: TOKENS.colors.textMuted,
-                        alignment: 'center',
-                        margin: [0, 4, 0, 8]
-                    }
-                ]
-            });
-
-            rows.push({
-                columns: [
-                    buildCell(leftUrl, i + 1),
-                    rightUrl ? buildCell(rightUrl, i + 2) : { width: '*', text: '' }
-                ],
-                columnGap: TOKENS.gallery.columnGapPt,
-                margin: [0, 4, 0, 6],
-                unbreakable: true
-            });
+        const notice = buildSecurityNoticeNode(model.securityNotice, platform);
+        if (notice) content.push(notice);
+        content.push(...buildChatHistoryNodes(model.messages, { platform, partnerAvatar: model.partnerAvatar }));
+        if (Array.isArray(model.chatImages) && model.chatImages.length) {
+            content.push(...buildTwoColumnGallery(model.chatImages, platform, 'Bilder aus dem Chat'));
         }
 
-        return rows;
+        if (model.includeAdPage !== false) {
+            content.push(buildTitleBar(title, platform, { pageBreak: 'before' }));
+            content.push(buildAdMetaSection(model));
+            content.push(...buildDescriptionBlock(model.description, platform));
+            if (Array.isArray(model.adImages) && model.adImages.length) {
+                content.push(...buildTwoColumnGallery(model.adImages, platform, 'Bilder'));
+            }
+        }
+
+        ensurePdfMakeEmojiFontRegistered();
+        return {
+            pageSize: TOKENS.page.size,
+            pageOrientation: TOKENS.page.orientation,
+            pageMargins: TOKENS.page.margins,
+            defaultStyle: { fontSize: TOKENS.page.defaultFontSize, lineHeight: TOKENS.page.defaultLineHeight },
+            info: {
+                title: `${model.platformLabel || ''} Chat - ${title}`,
+                author: model.scriptLabel || '',
+                subject: `Konversation ${meta.conversationId || ''} zu Anzeige ${meta.adId || ''}`
+            },
+            footer: buildPageFooter(),
+            pageBreakBefore: pageBreakBeforeKeepWithNext,
+            content
+        };
     }
 
     global.PdfSharedTheme = Object.freeze({
-        TOKENS,
-        META_LABELS,
-        MONTH_SHORT_DE,
-        resolvePlatform,
-        getTheme,
-        measureTextWidthPt,
-        stripTrailingColon,
-        normalizeCurrencyToEUR,
+        VERSION: LIB_VERSION,
+        isNa,
         cleanTextPreserveEmojis,
         extractTextFromNodePreserveEmojis,
-        buildRichTextWithEmojis,
-        buildParagraphNodeWithColorEmojis,
-        ensurePdfMakeEmojiFontRegistered,
-        buildKleinanzeigenBrandImageDataUrl,
+        parseAnyDateParts,
         normalizeMessageTimestamp,
-        formatDateGroupLabel,
         formatDateWithRelativeAge,
-        buildTitleBar,
-        buildLinkCell,
-        buildTotalAmountCell,
-        buildMetaTable,
-        buildUnifiedChatMetaSection,
-        buildUnifiedAdMetaSection,
         formatExportTimestamp,
-        buildExportedAtNode,
-        buildSectionHeader,
-        buildDescriptionBlock,
-        buildRoundedCardPdfNode,
-        buildAvatarCircleSvg,
-        buildOfferStatusBadgeSvg,
-        buildChatBubbleNode,
-        buildDateSeparatorNode,
-        buildMessageSubtextNode,
-        buildChatMessageRow,
-        buildSystemMessageNode,
-        buildEndOfChatNode,
-        buildChatHistoryNodes,
-        buildPageFooter,
+        parseMoney,
+        formatMoneyText,
+        moneyGroupNeedsDecimals,
+        sumMoney,
         normalizeGalleryImageDataUrl,
-        buildTwoColumnGallery
+        buildExportDocument
     });
 })(typeof window !== 'undefined' ? window : globalThis);
-
-window.PdfSharedTheme = PdfSharedTheme;
