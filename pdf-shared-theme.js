@@ -1,19 +1,19 @@
 /**
  * PdfSharedTheme – gemeinsame Design-, Layout- & Komponenten-Bibliothek (pdfmake) für alle
  * Marktplatz-PDF-Exporter (eBay, Kleinanzeigen, später z. B. Vinted).
- * Version: 3.0.0
+ * Version: 3.1.1
  *
  * Verantwortung: NUR Darstellung. Plattform-Adapter liefern ein einheitliches Datenmodell
  * (siehe specs/001-marketplace-pdf-export/plan.md "Data Model"), diese Bibliothek baut daraus das komplette PDF-Dokument
- * (buildExportDocument). Ablauf/DB/Settings/Toast liegen in marketplace-export-core.js.
+ * (buildExportDocument, buildInvoiceDocument, buildReportDocument). Ablauf/DB/Settings/Toast liegen in marketplace-export-core.js.
  *
- * Einbindung (versionierte URL, sonst cached Tampermonkey die alte Datei):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/v3.0.0/pdf-shared-theme.js
+ * Einbindung (Versions-Parameter erzwingt Neuladen aus dem Tampermonkey-Cache):
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-shared-theme.js?v=3.1.1
  */
 (function (global) {
     'use strict';
 
-    const LIB_VERSION = '3.0.0';
+    const LIB_VERSION = '3.1.1';
 
     const MONTH_SHORT_DE = Object.freeze([
         'Jan.', 'Feb.', 'Mär.', 'Apr.', 'Mai', 'Jun.',
@@ -44,6 +44,13 @@
         TOTAL_AMOUNT: 'Gesamtbetrag',
         PAYMENT_METHOD: 'Zahlungsart',
         TRACKING_ID: 'Sendungsverfolgungsnummer',
+        REFUND: 'Rückerstattung',
+        TRANSACTION_FEE: 'Transaktionsgebühren',
+        AD_FEE: 'Anzeigengebühr',
+        SHIPPING_ACTUAL: 'Versandkosten (tatsächlich)',
+        EARNINGS: 'Erlös',
+        LISTING_DURATION: 'Angebotsdauer',
+        PICKUP: 'Abholung',
         EXPORTED_AT: 'Exportiert / Erstellt am'
     });
 
@@ -146,9 +153,7 @@
             boxWidthPt: 245,
             boxHeightPt: 200,
             columnGapPt: 14,
-            canvasTargetWidthPx: 980,
-            canvasTargetHeightPx: 800
-        },
+                    },
         chat: {
             maxBubbleShare: 0.62,
             minBubbleWidthPt: 78,
@@ -532,84 +537,25 @@
         }
     }
 
-    /**
-     * Zeichnet ein beliebiges Farb-Emoji (wie 👍, 😊, 🎉) samt Text-Run direkt als hochauflösendes
-     * transparentes Farb-PNG auf einem <canvas>, falls eine Zeile echte Farb-Emojis enthält.
-     * Dadurch erscheinen Emojis im PDF in 100% Originalfarbe (gelb/bunt) statt als schwarze Klötzchen!
-     */
-    function renderColorEmojiTextLineToPngDataUrl(textStr, options = {}) {
+    const emojiPngCache = new Map();
+
+    /** Ein einzelnes Emoji (Graphem) als transparentes Farb-PNG, gecacht. Null ohne Canvas. */
+    function renderEmojiPng(grapheme) {
+        if (emojiPngCache.has(grapheme)) return emojiPngCache.get(grapheme);
         if (typeof document === 'undefined') return null;
-        const fontSizePt = options.fontSize || TOKENS.typography.bodyFontSize;
-        const textColor = options.color || '#111827';
-        const isBold = Boolean(options.bold);
-        const maxWidthPt = options.maxWidthPt || 310;
-
-        const scale = 3.2;
-        const fontPx = fontSizePt * scale;
-        const lineHeightPx = fontPx * (options.lineHeight || 1.28);
-        const maxWidthPx = maxWidthPt * scale;
-
+        const size = 72;
         const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
         const ctx = canvas.getContext('2d');
         if (!ctx) return null;
-
-        const fontSpec = `${isBold ? 'bold ' : ''}${fontPx}px Roboto, Arial, "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif`;
-        ctx.font = fontSpec;
-
-        const paragraphs = String(textStr || '').split(/\r?\n/);
-        const wrappedLines = [];
-
-        for (const para of paragraphs) {
-            if (!para.trim()) {
-                wrappedLines.push('');
-                continue;
-            }
-            const words = para.split(/[ \t]+/);
-            let currentLine = '';
-            for (const word of words) {
-                const candidate = currentLine ? `${currentLine} ${word}` : word;
-                if (ctx.measureText(candidate).width <= maxWidthPx) {
-                    currentLine = candidate;
-                } else {
-                    if (currentLine) wrappedLines.push(currentLine);
-                    currentLine = word;
-                }
-            }
-            if (currentLine) wrappedLines.push(currentLine);
-        }
-
-        if (wrappedLines.length === 0) wrappedLines.push('');
-
-        let actualMaxW = 40;
-        for (const l of wrappedLines) {
-            const w = ctx.measureText(l).width;
-            if (w > actualMaxW) actualMaxW = w;
-        }
-
-        const padTopPx = Math.ceil(fontPx * 0.25);
-        const padBottomPx = Math.ceil(fontPx * 0.28);
-        const canvasW = Math.min(Math.ceil(maxWidthPx + 8), Math.ceil(actualMaxW + 8));
-        const canvasH = Math.ceil(wrappedLines.length * lineHeightPx + padTopPx + padBottomPx);
-
-        canvas.width = Math.max(16, canvasW);
-        canvas.height = Math.max(16, canvasH);
-
-        const drawCtx = canvas.getContext('2d');
-        if (!drawCtx) return null;
-        drawCtx.clearRect(0, 0, canvas.width, canvas.height);
-        drawCtx.font = fontSpec;
-        drawCtx.fillStyle = textColor;
-        drawCtx.textBaseline = 'top';
-
-        wrappedLines.forEach((line, idx) => {
-            drawCtx.fillText(line, 1, padTopPx + idx * lineHeightPx);
-        });
-
-        return {
-            dataUrl: canvas.toDataURL('image/png'),
-            widthPt: +(canvas.width / scale).toFixed(2),
-            heightPt: +(canvas.height / scale).toFixed(2)
-        };
+        ctx.font = '60px "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(grapheme, size / 2, size / 2 + 3);
+        const url = canvas.toDataURL('image/png');
+        emojiPngCache.set(grapheme, url);
+        return url;
     }
 
     function hasColorEmoji(str) {
@@ -645,11 +591,26 @@
         return runs.length === 1 ? runs[0] : runs;
     }
 
+    /** Zerlegt eine Zeile in Text- und Emoji-Tokens (⸻ bleibt Text, es hat eine eigene Schrift). */
+    function splitEmojiTokens(line) {
+        const tokens = [];
+        let last = 0;
+        EMOJI_TOKEN_REGEX.lastIndex = 0;
+        let m;
+        while ((m = EMOJI_TOKEN_REGEX.exec(line)) !== null) {
+            if (m[0] === '\u2E3B') continue;
+            if (m.index > last) tokens.push({ text: line.slice(last, m.index) });
+            tokens.push({ emoji: m[0] });
+            last = m.index + m[0].length;
+        }
+        if (last < line.length) tokens.push({ text: line.slice(last) });
+        return tokens;
+    }
+
     /**
-     * Erzeugt einen Text- oder Farb-Emoji-Block für Nachrichten und Beschreibungen:
-     * Wenn ein Absatz Farb-Emojis (z. B. 👍, 😊) enthält, wird dieser mit der nativen Farb-Emoji-Engine
-     * des Browsers als gestochen scharfes, transparentes Farb-PNG gerendert, sodass keine schwarzen
-     * Monochrom-Emojis entstehen. Reine Textzeilen bleiben 100% durchsuchbarer Vektortext.
+     * Absatz für Nachrichten und Beschreibungen. Text bleibt echter (markierbarer) Text; nur jedes einzelne
+     * Farb-Emoji wird als kleines Bild an seine Stelle gesetzt. Zeilen mit Emoji werden dafür selbst umbrochen
+     * und als Spalten (Text | Emoji | Text …) gesetzt.
      */
     function buildParagraphNodeWithColorEmojis(rawText, options = {}) {
         const cleaned = String(rawText || '').replace(/\r\n/g, '\n').trim();
@@ -660,56 +621,66 @@
         const color = options.color || TOKENS.colors.textPrimary;
         const bold = Boolean(options.bold);
         const italics = Boolean(options.italics);
-        const maxWidthPt = options.maxWidthPt || 310;
+        const maxWidthPt = (options.maxWidthPt || 310) * 0.94;
         const toRuns = (s) => (options.withLinks ? buildRichTextWithLinks(s) : buildRichTextWithEmojis(s));
+        const style = { fontSize, lineHeight, color, bold, italics };
 
-        if (!hasColorEmoji(cleaned)) {
-            return {
-                text: toRuns(cleaned),
-                fontSize,
-                lineHeight,
-                color,
-                bold,
-                italics
+        if (!hasColorEmoji(cleaned)) return { text: toRuns(cleaned), ...style };
+
+        const emojiW = +(fontSize * 1.2).toFixed(2);
+        const keepSpaces = (s) => s.replace(/^ +| +$/g, (sp) => '\u00a0'.repeat(sp.length));
+        const visualLine = (parts) => {
+            const columns = [];
+            let buf = '';
+            const flush = () => {
+                if (buf) columns.push({ width: 'auto', text: toRuns(keepSpaces(buf)), ...style });
+                buf = '';
             };
-        }
-
-        const lines = cleaned.split('\n');
-        const stackNodes = [];
-
-        for (const line of lines) {
-            if (!line.trim()) {
-                stackNodes.push({ text: ' ', fontSize: Math.round(fontSize * 0.6) });
-                continue;
-            }
-            if (hasColorEmoji(line)) {
-                const rendered = renderColorEmojiTextLineToPngDataUrl(line, {
-                    fontSize,
-                    lineHeight,
-                    color,
-                    bold,
-                    maxWidthPt
-                });
-                if (rendered && rendered.dataUrl) {
-                    stackNodes.push({
-                        image: rendered.dataUrl,
-                        width: rendered.widthPt,
-                        margin: [0, 1, 0, 1]
-                    });
-                    continue;
+            for (const p of parts) {
+                if (p.emoji) {
+                    flush();
+                    const img = renderEmojiPng(p.emoji);
+                    columns.push(img ? { width: emojiW, image: img, fit: [emojiW, emojiW], margin: [0, -1, 0, 0] } : { width: 'auto', text: p.emoji, ...style });
+                } else {
+                    buf += p.text;
                 }
             }
-            stackNodes.push({
-                text: toRuns(line),
-                fontSize,
-                lineHeight,
-                color,
-                bold,
-                italics
-            });
-        }
+            flush();
+            columns.push({ width: '*', text: '' });
+            return { columns, columnGap: 0 };
+        };
 
-        return stackNodes.length === 1 ? stackNodes[0] : { stack: stackNodes };
+        const stack = [];
+        for (const line of cleaned.split('\n')) {
+            if (!line.trim()) {
+                stack.push({ text: ' ', ...style });
+                continue;
+            }
+            if (!hasColorEmoji(line)) {
+                stack.push({ text: toRuns(line), ...style });
+                continue;
+            }
+            // Wörter und Emojis greedy auf Zeilenbreite verteilen
+            const words = [];
+            for (const tok of splitEmojiTokens(line)) {
+                if (tok.emoji) words.push({ emoji: tok.emoji, w: emojiW });
+                else for (const piece of tok.text.split(/(\s+)/)) if (piece) words.push({ text: piece, w: measureTextWidthPt(piece, fontSize, bold) });
+            }
+            let current = [];
+            let width = 0;
+            for (const word of words) {
+                if (width + word.w > maxWidthPt && current.length && !/^\s+$/.test(word.text || '')) {
+                    stack.push(visualLine(current));
+                    current = [];
+                    width = 0;
+                }
+                if (!current.length && /^\s+$/.test(word.text || '')) continue;
+                current.push(word);
+                width += word.w;
+            }
+            if (current.length) stack.push(visualLine(current));
+        }
+        return stack.length === 1 ? stack[0] : { stack };
     }
 
     /* ==========================================================================
@@ -760,6 +731,16 @@
         }
 
         if (day === null) {
+            // eBay-Verkäuferansicht: "Oct 30, 2026 12:45:59 PM CET"
+            const us = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2}),\s*(\d{4})\b/i.exec(combined);
+            if (us) {
+                day = parseInt(us[2], 10);
+                monthIndex = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(us[1].toLowerCase());
+                year = parseInt(us[3], 10);
+            }
+        }
+
+        if (day === null) {
             if (/\bvorgestern\b/i.test(combined)) {
                 const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 2);
                 day = d.getDate();
@@ -778,7 +759,10 @@
         }
 
         const timeMatch = /\b([01]?\d|2[0-3]):([0-5]\d)\b/.exec(combined);
-        const hh = timeMatch ? String(timeMatch[1]).padStart(2, '0') : null;
+        let hour = timeMatch ? parseInt(timeMatch[1], 10) : null;
+        if (hour !== null && /\bPM\b/.test(combined) && hour < 12) hour += 12;
+        if (hour === 12 && /\bAM\b/.test(combined)) hour = 0;
+        const hh = timeMatch ? String(hour).padStart(2, '0') : null;
         const min = timeMatch ? String(timeMatch[2]).padStart(2, '0') : null;
 
         if (day === null || monthIndex === null || year === null) {
@@ -892,24 +876,26 @@
         return TOKENS.themes[key] || TOKENS.themes.kleinanzeigen;
     }
 
-    const isNa = (v) => v === null || v === undefined || String(v).trim() === '' || /^n\/?a$/i.test(String(v).trim());
+    const isNa = (v) => v === null || v === undefined || String(v).trim() === '' || /^n\/?a\b/i.test(String(v).trim());
 
     /* ==========================================================================
-     * GELDBETRÄGE (EUR hinten, Präfix VB/ab vorne, rechtsbündig, einheitliche Nachkommastellen)
+     * GELDBETRÄGE (Präfix VB/ab | Betrag rechtsbündig | EUR – als Block linksbündig, einheitliche Nachkommastellen)
      * ========================================================================== */
 
     /**
-     * Zerlegt einen beliebigen Preis-String ("1 € VB", "EUR 15,00", "+ Versand ab 3,99 €", "15.00", "Kostenlos")
-     * in { prefix, cents, special }. special = Klartext ohne Zahl (z. B. "Abholung").
+     * Zerlegt einen beliebigen Preis-String ("1 € VB", "EUR 15,00", "+ Versand ab 3,99 €", "15.00", "-0,54 €", "Kostenlos")
+     * in { prefix, cents, special }. special = Klartext ohne Zahl (z. B. "Abholung"). Zahlen (Cent) werden durchgereicht.
      */
     function parseMoney(raw) {
         if (raw && typeof raw === 'object' && 'cents' in raw) return raw;
+        if (typeof raw === 'number') return { special: '', cents: Math.round(raw), prefix: '' };
         const s = String(raw === null || raw === undefined ? '' : raw).replace(/\u00a0/g, ' ').trim();
         if (isNa(s)) return { special: 'n/a', cents: null, prefix: '' };
         if (/zu\s+verschenken/i.test(s)) return { special: 'Zu verschenken', cents: 0, prefix: '' };
 
         const prefix = /\b(VB|VHB|Verhandlungsbasis)\b/i.test(s) ? 'VB' : /(^|\s)ab(\s|$)/i.test(s) ? 'ab' : '';
-        let m = /^(\d+)\.(\d{2})$/.exec(s);
+        const sign = /(^|[\s(])[-−]\s*(EUR|€)?\s*\d/.test(s) ? -1 : 1;
+        let m = /^-?(\d+)\.(\d{2})$/.exec(s);
         let cents = null;
         if (m) {
             cents = parseInt(m[1], 10) * 100 + parseInt(m[2], 10);
@@ -925,16 +911,18 @@
             if (/inkl/i.test(s)) return { special: 'inkl. Versand', cents: 0, prefix: '' };
             return { special: s, cents: null, prefix: '' };
         }
-        return { special: '', cents, prefix };
+        return { special: '', cents: sign * cents, prefix };
     }
 
-    function formatEuroAmount(cents, withDecimals) {
+    function formatEuroNumber(cents, withDecimals) {
         const euros = Math.floor(Math.abs(cents) / 100);
         const rest = Math.abs(cents) % 100;
         const intStr = String(euros).replace(/\B(?=(\d{3})+(?!\d))/g, '.');
         const sign = cents < 0 ? '-' : '';
-        return withDecimals || rest !== 0 ? `${sign}${intStr},${String(rest).padStart(2, '0')} EUR` : `${sign}${intStr} EUR`;
+        return withDecimals || rest !== 0 ? `${sign}${intStr},${String(rest).padStart(2, '0')}` : `${sign}${intStr}`;
     }
+
+    const formatEuroAmount = (cents, withDecimals) => `${formatEuroNumber(cents, withDecimals)} EUR`;
 
     /** true, wenn mindestens ein Betrag der Gruppe Nachkommastellen hat -> dann zeigen alle ",00". */
     function moneyGroupNeedsDecimals(values) {
@@ -947,22 +935,29 @@
         return `${m.prefix ? m.prefix + ' ' : ''}${formatEuroAmount(m.cents, withDecimals)}`;
     }
 
-    /** Tabellenzelle: Präfix links, Betrag rechtsbündig (EUR untereinander). */
-    function buildMoneyCell(raw, withDecimals = false, bold = false) {
-        const m = parseMoney(raw);
-        if (m.special) {
-            return { text: m.special, bold, alignment: m.cents === 0 || m.special === 'n/a' ? 'right' : 'left' };
+    /** Gemeinsame Spaltenbreiten einer Betragsgruppe, damit Präfix, Betrag und "EUR" untereinander stehen. */
+    function moneyLayout(values) {
+        const fs = TOKENS.typography.tableFontSize;
+        const decimals = moneyGroupNeedsDecimals(values);
+        let prefixW = 0;
+        let amountW = 0;
+        for (const m of values.map(parseMoney)) {
+            if (m.special) continue;
+            if (m.prefix) prefixW = Math.max(prefixW, Math.ceil(measureTextWidthPt(`${m.prefix}  `, fs, true) * 1.1));
+            amountW = Math.max(amountW, Math.ceil(measureTextWidthPt(formatEuroNumber(m.cents, decimals), fs, true) * 1.1) + 1);
         }
-        const amount = formatEuroAmount(m.cents, withDecimals);
-        if (!m.prefix) return { text: amount, bold, alignment: 'right' };
-        return {
-            columns: [
-                { text: m.prefix, width: 'auto', bold },
-                { text: amount, width: '*', alignment: 'right', bold }
-            ],
-            columnGap: 4,
-            __plain: `${m.prefix} ${amount}`
-        };
+        return { decimals, prefixW, amountW };
+    }
+
+    /** Tabellenzelle "VB | 10,00 | EUR" – als Block linksbündig, freier Platz bleibt rechts. */
+    function buildMoneyCell(raw, layout, bold = false) {
+        const m = parseMoney(raw);
+        if (m.special) return { text: m.special, bold };
+        const num = formatEuroNumber(m.cents, layout.decimals);
+        const columns = [];
+        if (layout.prefixW) columns.push({ width: layout.prefixW, text: m.prefix || '', bold });
+        columns.push({ width: layout.amountW, text: num, alignment: 'right', bold }, { width: '*', text: 'EUR', margin: [3, 0, 0, 0], bold });
+        return { columns, columnGap: 0, __plain: `${m.prefix ? `${m.prefix} ` : ''}${num} EUR` };
     }
 
     /** Summe aus Preis-Bestandteilen. Liefert '' wenn der Grundpreis fehlt. */
@@ -1196,35 +1191,55 @@
     function buildChatMetaSection(model) {
         const meta = model.meta || {};
         const caps = model.capabilities || {};
+        const L = { ...META_LABELS, ...(model.labels || {}) };
         const width = TOKENS.page.contentWidthPt;
 
         const topRows = [
-            [META_LABELS.AD_ID, linkOrText(meta.adId, meta.adUrl)],
-            [META_LABELS.CONV_ID, linkOrText(meta.conversationId, meta.conversationUrl)],
-            caps.orderId ? [META_LABELS.ORDER_ID, linkOrText(meta.orderId, meta.orderUrl)] : null,
-            [META_LABELS.SOURCE, model.platformLabel || 'n/a'],
-            [META_LABELS.CREATED_WITH, model.scriptLabel || 'n/a'],
-            [META_LABELS.CATEGORY, meta.category || 'n/a'],
-            [META_LABELS.AD_TYPE, meta.adType || 'n/a']
+            [L.AD_ID, linkOrText(meta.adId, meta.adUrl)],
+            [L.CONV_ID, linkOrText(meta.conversationId, meta.conversationUrl)],
+            caps.orderId ? [L.ORDER_ID, linkOrText(meta.orderId, meta.orderUrl)] : null,
+            [L.SOURCE, model.platformLabel || 'n/a'],
+            [L.CREATED_WITH, model.scriptLabel || 'n/a'],
+            [L.CATEGORY, meta.category || 'n/a'],
+            [L.AD_TYPE, meta.adType || 'n/a']
         ];
         const top = buildMetaTable(topRows, { startIndex: 0, width });
         let idx = rowCountOf(top);
 
+        const neg = (v) => {
+            const m = parseMoney(v);
+            return m.cents === null ? m : { ...m, cents: -Math.abs(m.cents) };
+        };
+        const fees = caps.fees && meta.role === 'SELLER' && !isNa(meta.orderId);
         const listedTotal = sumMoney([meta.listedPrice, meta.listedShipping]);
         const showFee = caps.buyerProtection && parseMoney(meta.buyerProtection).cents > 0;
-        const agreedTotal = sumMoney([meta.price, meta.shipping, showFee ? meta.buyerProtection : null].filter((x) => x !== null));
-        const decimals = moneyGroupNeedsDecimals([meta.listedPrice, meta.listedShipping, listedTotal, meta.price, meta.shipping, meta.buyerProtection, agreedTotal]);
+        const agreedTotal = sumMoney([meta.price, meta.shipping, showFee ? meta.buyerProtection : 0, fees ? neg(meta.refund) : 0]);
+        const feeParts = [meta.transactionFee, meta.adFee, meta.shippingActual];
+        const earnings = !fees ? '' : feeParts.some(isNa) ? 'n/a' : sumMoney([agreedTotal || null, ...feeParts.map(neg)]);
+        const qty = parseInt(meta.quantity, 10);
+
+        const leftValues = [meta.listedPrice, meta.listedShipping, listedTotal];
+        const rightValues = fees
+            ? [meta.price, meta.shipping, neg(meta.refund), agreedTotal, neg(meta.transactionFee), neg(meta.adFee), neg(meta.shippingActual), earnings]
+            : [meta.price, meta.shipping, showFee ? meta.buyerProtection : null, agreedTotal].filter((v) => v !== null);
+        const layout = moneyLayout([...leftValues, ...rightValues]);
+        const cell = (v, bold = false) => buildMoneyCell(v || 'n/a', layout, bold);
 
         const leftRows = [
-            [META_LABELS.LISTED_PRICE, buildMoneyCell(meta.listedPrice, decimals)],
-            [META_LABELS.LISTED_SHIPPING, buildMoneyCell(meta.listedShipping, decimals)],
-            [META_LABELS.LISTED_TOTAL, buildMoneyCell(listedTotal || 'n/a', decimals, true)]
+            [L.LISTED_PRICE, cell(meta.listedPrice)],
+            [L.LISTED_SHIPPING, cell(meta.listedShipping)],
+            [L.LISTED_TOTAL, cell(listedTotal, true)]
         ];
         const rightRows = [
-            [META_LABELS.AGREED_PRICE, buildMoneyCell(meta.price, decimals)],
-            [META_LABELS.AGREED_SHIPPING, buildMoneyCell(meta.shipping, decimals)],
-            showFee ? [META_LABELS.BUYER_PROTECTION, buildMoneyCell(meta.buyerProtection, decimals)] : null,
-            [META_LABELS.TOTAL_AMOUNT, buildMoneyCell(agreedTotal || 'n/a', decimals, true)]
+            [qty > 1 ? `${L.AGREED_PRICE} (${qty} Stück)` : L.AGREED_PRICE, cell(meta.price)],
+            [L.AGREED_SHIPPING, cell(meta.shipping)],
+            showFee ? [L.BUYER_PROTECTION, cell(meta.buyerProtection)] : null,
+            fees ? [L.REFUND, cell(neg(meta.refund))] : null,
+            [L.TOTAL_AMOUNT, cell(agreedTotal, true)],
+            fees ? [L.TRANSACTION_FEE, cell(neg(meta.transactionFee))] : null,
+            fees ? [L.AD_FEE, cell(neg(meta.adFee))] : null,
+            fees ? [L.SHIPPING_ACTUAL, cell(neg(meta.shippingActual))] : null,
+            fees ? [L.EARNINGS, cell(earnings, true)] : null
         ].filter(Boolean);
 
         const gap = TOKENS.table.priceBlockGapPt;
@@ -1235,13 +1250,13 @@
         idx += Math.max(rowCountOf(left), rowCountOf(right));
 
         const bottomRows = [
-            caps.paymentMethod ? [META_LABELS.PAYMENT_METHOD, { text: meta.paymentMethod || 'n/a', bold: !isNa(meta.paymentMethod) }] : null,
-            [META_LABELS.TRACKING_ID, isNa(meta.trackingId) ? 'n/a' : buildLinkCell(meta.trackingId, meta.trackingUrl || '', meta.trackingCarrier || '')],
-            [META_LABELS.CREATED_DATE, formatDateWithRelativeAge(meta.createdAt, 'days')],
-            [META_LABELS.BUYER_NAME, linkOrText(meta.buyerName, meta.buyerUrl)],
-            [META_LABELS.SELLER_NAME, linkOrText(meta.sellerName, meta.sellerUrl)],
-            [META_LABELS.SELLER_TYPE, meta.sellerType || 'n/a'],
-            [META_LABELS.SELLER_SINCE, formatDateWithRelativeAge(meta.sellerActiveSince, 'activeSince')]
+            caps.paymentMethod ? [L.PAYMENT_METHOD, { text: meta.paymentMethod || 'n/a', bold: !isNa(meta.paymentMethod) }] : null,
+            [L.TRACKING_ID, isNa(meta.trackingId) ? 'n/a' : buildLinkCell(meta.trackingId, meta.trackingUrl || '', meta.trackingCarrier || '')],
+            [L.CREATED_DATE, formatDateWithRelativeAge(meta.createdAt, 'days')],
+            [L.BUYER_NAME, linkOrText(meta.buyerName, meta.buyerUrl)],
+            [L.SELLER_NAME, linkOrText(meta.sellerName, meta.sellerUrl)],
+            [L.SELLER_TYPE, meta.sellerType || 'n/a'],
+            [L.SELLER_SINCE, formatDateWithRelativeAge(meta.sellerActiveSince, 'activeSince')]
         ];
         const bottom = buildMetaTable(bottomRows, { startIndex: idx, width });
 
@@ -1258,31 +1273,36 @@
     /**
      * Anzeigen-Metadaten (eigene Seite):
      * Anzeigen-ID, Quelle, Erstellt mit, Kategorie, Anzeigentyp, Preis/Versand/Gesamtbetrag (Anzeige),
-     * Ort (nicht bei eigenen Artikeln), Eingestellt am, Verkäufername, Verkäufer-Typ, Aktiv seit
+     * Ort (nicht bei eigenen Artikeln), Eingestellt am, [Angebotsdauer, Abholung, Käufername], Verkäufername, Verkäufer-Typ, Aktiv seit
      * Danach "Artikelmerkmale" (Streifen laufen weiter) und darunter der Export-Zeitstempel.
      */
     function buildAdMetaSection(model) {
         const meta = model.meta || {};
+        const L = { ...META_LABELS, ...(model.labels || {}) };
         const width = TOKENS.page.contentWidthPt;
         const listedTotal = sumMoney([meta.listedPrice, meta.listedShipping]);
-        const decimals = moneyGroupNeedsDecimals([meta.listedPrice, meta.listedShipping, listedTotal]);
+        const layout = moneyLayout([meta.listedPrice, meta.listedShipping, listedTotal]);
         const isOwnAd = meta.role === 'SELLER';
         const mapsUrl = !isNa(meta.location) ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(meta.location)}` : '';
+        const optional = (label, value) => (isNa(value) ? null : [label, String(value)]);
 
         const rows = [
-            [META_LABELS.AD_ID, linkOrText(meta.adId, meta.adUrl)],
-            [META_LABELS.SOURCE, model.platformLabel || 'n/a'],
-            [META_LABELS.CREATED_WITH, model.scriptLabel || 'n/a'],
-            [META_LABELS.CATEGORY, meta.category || 'n/a'],
-            [META_LABELS.AD_TYPE, meta.adType || 'n/a'],
-            [META_LABELS.LISTED_PRICE, buildMoneyCell(meta.listedPrice, decimals)],
-            [META_LABELS.LISTED_SHIPPING, buildMoneyCell(meta.listedShipping, decimals)],
-            [META_LABELS.LISTED_TOTAL, buildMoneyCell(listedTotal || 'n/a', decimals, true)],
-            isOwnAd ? null : [META_LABELS.LOCATION, linkOrText(meta.location, mapsUrl)],
-            [META_LABELS.CREATED_DATE, formatDateWithRelativeAge(meta.createdAt, 'days')],
-            [META_LABELS.SELLER_NAME, linkOrText(meta.sellerName, meta.sellerUrl)],
-            [META_LABELS.SELLER_TYPE, meta.sellerType || 'n/a'],
-            [META_LABELS.SELLER_SINCE, formatDateWithRelativeAge(meta.sellerActiveSince, 'activeSince')]
+            [L.AD_ID, linkOrText(meta.adId, meta.adUrl)],
+            [L.SOURCE, model.platformLabel || 'n/a'],
+            [L.CREATED_WITH, model.scriptLabel || 'n/a'],
+            [L.CATEGORY, meta.category || 'n/a'],
+            [L.AD_TYPE, meta.adType || 'n/a'],
+            [L.LISTED_PRICE, buildMoneyCell(meta.listedPrice || 'n/a', layout)],
+            [L.LISTED_SHIPPING, buildMoneyCell(meta.listedShipping || 'n/a', layout)],
+            [L.LISTED_TOTAL, buildMoneyCell(listedTotal || 'n/a', layout, true)],
+            isOwnAd ? null : [L.LOCATION, linkOrText(meta.location, mapsUrl)],
+            [L.CREATED_DATE, formatDateWithRelativeAge(meta.createdAt, 'days')],
+            optional(L.LISTING_DURATION, meta.listingDuration),
+            optional(L.PICKUP, meta.pickup),
+            isOwnAd && !isNa(meta.buyerName) ? [L.BUYER_NAME, linkOrText(meta.buyerName, meta.buyerUrl)] : null,
+            [L.SELLER_NAME, linkOrText(meta.sellerName, meta.sellerUrl)],
+            [L.SELLER_TYPE, meta.sellerType || 'n/a'],
+            [L.SELLER_SINCE, formatDateWithRelativeAge(meta.sellerActiveSince, 'activeSince')]
         ];
         const table = buildMetaTable(rows, { width });
         const stack = [table];
@@ -1342,54 +1362,62 @@
      * ABGERUNDETE KARTEN (SVG-Kappen oben/unten + Tabellen-Mittelteil)
      * ========================================================================== */
 
+    // pdfmake zeichnet die Seitenlinie mit ihrer Mitte eine halbe Strichbreite AUSSERHALB des Zellinhalts;
+    // die SVG-Kappen sind daher um je eine Strichbreite breiter und ihr Strich liegt exakt auf dieser Linienmitte.
+    const CARD_STROKE = 0.8;
+    const CARD_OFF = CARD_STROKE / 2;
+    const f2 = (n) => +n.toFixed(2);
+
     function buildRoundedTopCapSvg(widthPt, radiusPt, fillColor, strokeColor = '') {
         const w = Math.max(40, Math.round(widthPt));
         const r = Math.min(12, Math.max(4, Math.round(radiusPt)));
-        const k = +(r * 0.55228475).toFixed(2);
-        const h = r;
-        const dFill = `M 0 ${h + 1} L 0 ${r} C 0 ${+(r - k).toFixed(2)}, ${+(r - k).toFixed(2)} 0, ${r} 0 L ${w - r} 0 C ${+(w - r + k).toFixed(2)} 0, ${w} ${+(r - k).toFixed(2)}, ${w} ${r} L ${w} ${h + 1} Z`;
-        const strokeTag = strokeColor
-            ? `<path d="M 0.4 ${h} L 0.4 ${r} C 0.4 ${+(r - k).toFixed(2)}, ${+(r - k).toFixed(2)} 0.4, ${r} 0.4 L ${w - r} 0.4 C ${+(w - r + k).toFixed(2)} 0.4, ${w - 0.4} ${+(r - k).toFixed(2)}, ${w - 0.4} ${r} L ${w - 0.4} ${h}" fill="none" stroke="${strokeColor}" stroke-width="0.8"/>`
-            : '';
-        return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><path d="${dFill}" fill="${fillColor}"/>${strokeTag}</svg>`;
+        const k = f2(r * 0.55228475);
+        const o = strokeColor ? CARD_OFF : 0;
+        const x0 = o;
+        const x1 = w + 3 * o;
+        const W = x1 + o;
+        const h = r + o;
+        const y0 = o;
+        const arc = `M ${x0} ${h + 1} L ${x0} ${y0 + r} C ${x0} ${f2(y0 + r - k)}, ${f2(x0 + r - k)} ${y0}, ${x0 + r} ${y0} L ${f2(x1 - r)} ${y0} C ${f2(x1 - r + k)} ${y0}, ${x1} ${f2(y0 + r - k)}, ${x1} ${y0 + r} L ${x1} ${h + 1}`;
+        const strokeTag = strokeColor ? `<path d="${arc}" fill="none" stroke="${strokeColor}" stroke-width="${CARD_STROKE}"/>` : '';
+        return { svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${h}" viewBox="0 0 ${W} ${h}"><path d="${arc} Z" fill="${fillColor}"/>${strokeTag}</svg>`, width: W, offset: 2 * o };
     }
 
     function buildRoundedBottomCapSvg(widthPt, radiusPt, fillColor, roundLeft, roundRight, strokeColor = '') {
         const w = Math.max(40, Math.round(widthPt));
         const r = Math.min(12, Math.max(4, Math.round(radiusPt)));
-        const k = +(r * 0.55228475).toFixed(2);
-        const h = r;
-        const rightEdge = roundRight ? `L ${w} 0 C ${w} ${k}, ${+(w - r + k).toFixed(2)} ${h}, ${w - r} ${h}` : `L ${w} 0 L ${w} ${h}`;
-        const leftEdge = roundLeft ? `L ${r} ${h} C ${+(r - k).toFixed(2)} ${h}, 0 ${k}, 0 0` : `L 0 ${h} L 0 0`;
-        const dFill = `M 0 -1 L ${w} -1 ${rightEdge} ${leftEdge} Z`;
-        let strokeTag = '';
-        if (strokeColor) {
-            const e = 0.4;
-            const sRight = roundRight
-                ? `M ${w - e} 0 C ${w - e} ${k}, ${+(w - r + k).toFixed(2)} ${h - e}, ${w - r} ${h - e}`
-                : `M ${w - e} 0 L ${w - e} ${h - e}`;
-            const sLeft = roundLeft ? `L ${r} ${h - e} C ${+(r - k).toFixed(2)} ${h - e}, ${e} ${k}, ${e} 0` : `L ${e} ${h - e} L ${e} 0`;
-            strokeTag = `<path d="${sRight} ${sLeft}" fill="none" stroke="${strokeColor}" stroke-width="0.8"/>`;
-        }
-        return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><path d="${dFill}" fill="${fillColor}"/>${strokeTag}</svg>`;
+        const k = f2(r * 0.55228475);
+        const o = strokeColor ? CARD_OFF : 0;
+        const x0 = o;
+        const x1 = w + 3 * o;
+        const W = x1 + o;
+        const yb = r;
+        const right = roundRight ? `L ${x1} 0 C ${x1} ${k}, ${f2(x1 - r + k)} ${yb}, ${f2(x1 - r)} ${yb}` : `L ${x1} 0 L ${x1} ${yb}`;
+        const left = roundLeft ? `L ${x0 + r} ${yb} C ${f2(x0 + r - k)} ${yb}, ${x0} ${k}, ${x0} 0` : `L ${x0} ${yb} L ${x0} 0`;
+        const fill = `<path d="M ${x0} -1 L ${x1} -1 ${right} ${left} Z" fill="${fillColor}"/>`;
+        const strokeTag = strokeColor ? `<path d="M ${x1} -1 ${right} ${left} L ${x0} -1" fill="none" stroke="${strokeColor}" stroke-width="${CARD_STROKE}"/>` : '';
+        return { svg: `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${yb + o}" viewBox="0 0 ${W} ${yb + o}">${fill}${strokeTag}</svg>`, width: W, offset: 2 * o };
     }
 
     function buildRoundedCardPdfNode({ widthPt, radiusPt = 9, fillColor, strokeColor = '', roundBottomLeft = true, roundBottomRight = true, bodyStack, padX = 9 }) {
         const w = Math.round(widthPt);
         const hasStroke = Boolean(strokeColor);
         const fill = fillColor || '#ffffff';
+        const top = buildRoundedTopCapSvg(w, radiusPt, fill, strokeColor);
+        const bottom = buildRoundedBottomCapSvg(w, radiusPt, fill, roundBottomLeft, roundBottomRight, strokeColor);
+        const noBorder = [false, false, false, false];
         return {
             table: {
                 widths: [w],
                 body: [
-                    [{ svg: buildRoundedTopCapSvg(w, radiusPt, fill, strokeColor), width: w, border: [false, false, false, false], margin: [0, 0, 0, -0.6] }],
+                    [{ svg: top.svg, width: top.width, border: noBorder, margin: [-top.offset, -top.offset, -top.offset, -0.6] }],
                     [{ stack: bodyStack, fillColor: fill, border: [hasStroke, false, hasStroke, false], margin: [padX, 0, padX, 0] }],
-                    [{ svg: buildRoundedBottomCapSvg(w, radiusPt, fill, roundBottomLeft, roundBottomRight, strokeColor), width: w, border: [false, false, false, false], margin: [0, -0.6, 0, 0] }]
+                    [{ svg: bottom.svg, width: bottom.width, border: noBorder, margin: [-bottom.offset, -0.6, -bottom.offset, -bottom.offset] }]
                 ]
             },
             layout: {
                 hLineWidth: () => 0,
-                vLineWidth: () => (hasStroke ? 0.8 : 0),
+                vLineWidth: () => (hasStroke ? CARD_STROKE : 0),
                 vLineColor: () => strokeColor || fill,
                 paddingLeft: () => 0,
                 paddingRight: () => 0,
@@ -1678,6 +1706,10 @@
     function buildSecurityNoticeNode(notice, platform) {
         if (!notice) return null;
         const theme = getTheme(platform);
+        if (notice.style === 'plain') {
+            // eBay: schlichter, hellgrauer Hinweistext ohne Rahmen (wie im Original)
+            return { text: buildRunsNode(notice.runs), fontSize: 8, color: TOKENS.colors.textTimestamp, lineHeight: 1.25, margin: [0, 2, 0, 10] };
+        }
         const width = TOKENS.page.contentWidthPt;
         const stack = [];
         if (notice.logoDataUrl) stack.push({ image: notice.logoDataUrl, width: notice.logoWidthPt || 92, margin: [0, 0, 0, 6] });
@@ -1759,47 +1791,18 @@
      * GALERIE
      * ========================================================================== */
 
-    function normalizeGalleryImageDataUrl(sourceDataUrl) {
-        return new Promise((resolve) => {
-            if (!sourceDataUrl) {
-                resolve('');
-                return;
-            }
-            const img = new Image();
-            img.onload = () => {
-                const targetW = TOKENS.gallery.canvasTargetWidthPx;
-                const targetH = TOKENS.gallery.canvasTargetHeightPx;
-                const srcW = img.naturalWidth || img.width || targetW;
-                const srcH = img.naturalHeight || img.height || targetH;
-                const canvas = document.createElement('canvas');
-                canvas.width = targetW;
-                canvas.height = targetH;
-                const ctx = canvas.getContext('2d');
-                ctx.fillStyle = '#FFFFFF';
-                ctx.fillRect(0, 0, targetW, targetH);
-                const scale = Math.min(targetW / srcW, targetH / srcH);
-                const drawW = Math.round(srcW * scale);
-                const drawH = Math.round(srcH * scale);
-                ctx.drawImage(img, 0, 0, srcW, srcH, Math.round((targetW - drawW) / 2), Math.round((targetH - drawH) / 2), drawW, drawH);
-                resolve(canvas.toDataURL('image/jpeg', 0.92));
-            };
-            img.onerror = () => resolve(sourceDataUrl);
-            img.src = sourceDataUrl;
-        });
-    }
-
-    /** 2-spaltige Galerie, Bildunterschrift nur "n/m" zentriert. Überschrift bleibt mit der ersten Bildzeile zusammen. */
+    /** 2-spaltige Galerie, Bildunterschrift nur "n/m" zentriert direkt unter dem Bild. Überschrift bleibt mit der ersten Bildzeile zusammen. */
     function buildTwoColumnGallery(images, platform = 'auto', sectionTitle = 'Bilder') {
-        const list = (Array.isArray(images) ? images : []).map((i) => (typeof i === 'string' ? i : i && (i.galleryDataUrl || i.dataUrl))).filter(Boolean);
+        const list = (Array.isArray(images) ? images : []).map((i) => (typeof i === 'string' ? i : i && i.dataUrl)).filter(Boolean);
         if (list.length === 0) return [];
         const total = list.length;
-        const header = buildSectionHeader(`${sectionTitle} (${total})`, platform, { margin: [0, 10, 0, 6] });
+        const header = buildSectionHeader(`${sectionTitle} (${total})`, platform, { margin: [0, 10, 0, 2] });
         delete header.headlineLevel;
         const cell = (dataUrl, n) => ({
             width: '*',
             stack: [
                 { image: dataUrl, fit: [TOKENS.gallery.boxWidthPt, TOKENS.gallery.boxHeightPt], alignment: 'center' },
-                { text: `${n}/${total}`, fontSize: TOKENS.typography.galleryCaptionSize, bold: true, color: TOKENS.colors.textMuted, alignment: 'center', margin: [0, 4, 0, 8] }
+                { text: `${n}/${total}`, fontSize: TOKENS.typography.galleryCaptionSize, bold: true, color: TOKENS.colors.textMuted, alignment: 'center', margin: [0, 2, 0, 0] }
             ]
         });
         const rows = [];
@@ -1807,20 +1810,21 @@
             rows.push({
                 columns: [cell(list[i], i + 1), i + 1 < total ? cell(list[i + 1], i + 2) : { width: '*', text: '' }],
                 columnGap: TOKENS.gallery.columnGapPt,
-                margin: [0, 4, 0, 6],
+                margin: [0, 4, 0, 8],
                 unbreakable: true
             });
         }
         return [keepTogether([header, rows[0]]), ...rows.slice(1)];
     }
 
-    function buildPageFooter() {
+    /** Fußzeile: Seitenzahl, optional mit Erstellungshinweis (Rechnung/Bericht). */
+    function buildPageFooter(note = '') {
         return (currentPage, pageCount) => ({
-            text: `${currentPage}/${pageCount}`,
-            alignment: 'center',
-            fontSize: TOKENS.typography.footerFontSize,
-            color: TOKENS.colors.textMuted,
-            margin: [0, 10, 0, 0]
+            columns: [
+                { width: '*', text: note, fontSize: 7, color: TOKENS.colors.textMuted },
+                { width: 40, text: `${currentPage}/${pageCount}`, alignment: 'right', fontSize: TOKENS.typography.footerFontSize, color: TOKENS.colors.textMuted }
+            ],
+            margin: [TOKENS.page.margins[0], 10, TOKENS.page.margins[2], 0]
         });
     }
 
@@ -1851,7 +1855,11 @@
 
         const notice = buildSecurityNoticeNode(model.securityNotice, platform);
         if (notice) content.push(notice);
-        content.push(...buildChatHistoryNodes(model.messages, { platform, partnerAvatar: model.partnerAvatar }));
+        if (Array.isArray(model.messages) && model.messages.length) {
+            content.push(...buildChatHistoryNodes(model.messages, { platform, partnerAvatar: model.partnerAvatar }));
+        } else {
+            content.push({ text: 'Kein Nachrichtenverlauf vorhanden.', alignment: 'center', italics: true, color: TOKENS.colors.textMuted, margin: [0, 14, 0, 14] });
+        }
         if (Array.isArray(model.chatImages) && model.chatImages.length) {
             content.push(...buildTwoColumnGallery(model.chatImages, platform, 'Bilder aus dem Chat'));
         }
@@ -1882,6 +1890,127 @@
         };
     }
 
+    /* ==========================================================================
+     * RECHNUNG & STEUERBERICHT (Beträge in Cent)
+     * ========================================================================== */
+
+    const eur = (cents) => (cents === null || cents === undefined ? 'n/a' : formatEuroAmount(cents, true));
+    const smallLabel = (text) => ({ text, fontSize: 8, bold: true, color: TOKENS.colors.textMuted, margin: [0, 0, 0, 2] });
+    const thinTable = {
+        hLineWidth: (i, node) => (i === 0 || i === node.table.body.length ? 0 : 0.5),
+        vLineWidth: () => 0,
+        hLineColor: () => TOKENS.colors.tableBorder,
+        paddingLeft: () => 4,
+        paddingRight: () => 4,
+        paddingTop: () => 3,
+        paddingBottom: () => 3
+    };
+
+    function documentShell(title, subject, author, footerNote, content, orientation = 'portrait') {
+        ensurePdfMakeEmojiFontRegistered();
+        return {
+            pageSize: TOKENS.page.size,
+            pageOrientation: orientation,
+            pageMargins: TOKENS.page.margins,
+            defaultStyle: { fontSize: TOKENS.page.defaultFontSize, lineHeight: TOKENS.page.defaultLineHeight },
+            info: { title, author, subject },
+            footer: buildPageFooter(footerNote),
+            pageBreakBefore: pageBreakBeforeKeepWithNext,
+            content
+        };
+    }
+
+    /**
+     * Rechnung je Bestellung. inv = { platform, platformLabel, scriptLabel, exportedAt, seller:{lines}, buyer:{lines},
+     * order:{orderId, orderUrl, recordNumber, soldDate, paidDate, shippingService, trackingId, trackingUrl},
+     * items:[{title, itemId, itemUrl, quantity, unitPrice, total}], amounts:{itemsTotal, shippingCharged, subtotal,
+     * refund, shippingActual, transactionFee, adFee, total}, shippingActualLabel }
+     */
+    function buildInvoiceDocument(inv) {
+        const platform = resolvePlatform(inv.platform);
+        const o = inv.order || {};
+        const a = inv.amounts || {};
+        const footer = `${META_LABELS.EXPORTED_AT} ${inv.exportedAt} mit ${inv.scriptLabel}`;
+        const block = (label, lines) => ({ width: '*', stack: [smallLabel(label), ...(lines || []).filter(Boolean).map((l) => ({ text: l, fontSize: 9 }))] });
+        const orderLines = [
+            { text: [`Bestellnummer: `, o.orderUrl ? linkRun(o.orderId, o.orderUrl) : o.orderId || 'n/a'], fontSize: 9 },
+            o.recordNumber ? { text: `Verkaufsprotokollnr.: ${o.recordNumber}`, fontSize: 9 } : null,
+            { text: `Verkauft am: ${o.soldDate || 'n/a'}`, fontSize: 9 },
+            { text: `Bezahlt am: ${o.paidDate || 'n/a'}`, fontSize: 9 },
+            { text: `Versandservice: ${o.shippingService || 'n/a'}`, fontSize: 9 },
+            { text: [`Sendungsnummer: `, o.trackingUrl ? linkRun(o.trackingId, o.trackingUrl) : o.trackingId || 'n/a'], fontSize: 9 }
+        ].filter(Boolean);
+
+        const itemRows = (inv.items || []).map((it) => [
+            { stack: [{ text: it.title, bold: true }, { text: ['Artikelnummer: ', it.itemUrl ? linkRun(it.itemId, it.itemUrl) : it.itemId || 'n/a'], fontSize: 8, color: TOKENS.colors.textMuted }] },
+            { text: String(it.quantity || 1), alignment: 'center' },
+            { text: eur(it.unitPrice), alignment: 'right' },
+            { text: eur(it.total), alignment: 'right' }
+        ]);
+        const head = ['Artikel', 'Stückzahl', 'Artikelpreis', 'Artikelpreis gesamt'].map((t, i) => ({ text: t, bold: true, fontSize: 8.5, alignment: i === 0 ? 'left' : i === 1 ? 'center' : 'right' }));
+
+        const neg = (c) => (c === null || c === undefined ? null : -Math.abs(c));
+        const sumRows = [
+            ['Artikelpreis gesamt', a.itemsTotal],
+            ['Versanderlös', a.shippingCharged],
+            ['Zwischensumme', a.subtotal, true],
+            ['Erstattungen / Rabatt', neg(a.refund)],
+            [`Versandkosten${inv.shippingActualLabel ? ` (${inv.shippingActualLabel})` : ''}`, neg(a.shippingActual)],
+            ['Transaktionsgebühren', neg(a.transactionFee)],
+            ['Anzeigengebühren', neg(a.adFee)],
+            ['Gesamtbetrag', a.total, true]
+        ].map(([label, cents, bold]) => [{ text: label, bold: Boolean(bold) }, { text: eur(cents), alignment: 'right', bold: Boolean(bold) }]);
+
+        const content = [
+            buildTitleBar(`Rechnung \u2022 Bestellung ${o.orderId || 'n/a'}`, platform),
+            { columns: [block('Absender', inv.seller && inv.seller.lines), block('Lieferadresse', inv.buyer && inv.buyer.lines), { width: '*', stack: [smallLabel('Bestellung'), ...orderLines] }], columnGap: 14, margin: [0, 4, 0, 14] },
+            { table: { headerRows: 1, widths: ['*', 55, 75, 95], body: [head, ...itemRows] }, layout: thinTable },
+            { columns: [{ width: '*', text: '' }, { width: 300, table: { widths: ['*', 90], body: sumRows }, layout: thinTable }], margin: [0, 12, 0, 0] }
+        ];
+        return documentShell(`Rechnung ${o.orderId || ''}`, `${inv.platformLabel} Bestellung ${o.orderId || ''}`, inv.scriptLabel, footer, content);
+    }
+
+    /**
+     * Steuerbericht. rep = { platform, platformLabel, scriptLabel, exportedAt, periodLabel,
+     * totals:{gross, refunds, shippingCharged, shippingActual, transactionFees, adFees, net},
+     * rows:[{date, orderId, orderUrl, items:[{title,itemId}], buyer, revenue, fees, total}] }
+     */
+    function buildReportDocument(rep) {
+        const platform = resolvePlatform(rep.platform);
+        const t = rep.totals || {};
+        const footer = `${META_LABELS.EXPORTED_AT} ${rep.exportedAt} mit ${rep.scriptLabel}`;
+        const overview = [
+            ['Bestellungen (Gesamtbetrag)', t.gross, true],
+            ['Rückerstattungen und Gutschriften', -Math.abs(t.refunds || 0)],
+            ['davon Versanderlös', t.shippingCharged],
+            ['Versandkosten', -Math.abs(t.shippingActual || 0)],
+            ['Transaktionsgebühren', -Math.abs(t.transactionFees || 0)],
+            ['Anzeigengebühren', -Math.abs(t.adFees || 0)],
+            ['Ergebnis', t.net, true]
+        ].map(([label, cents, bold]) => [{ text: label, bold: Boolean(bold) }, { text: eur(cents), alignment: 'right', bold: Boolean(bold) }]);
+
+        const head = ['Datum', 'Bestellnummer', 'Artikel', 'Umsatz', 'Gebühren', 'Gesamtbetrag'].map((x, i) => ({ text: x, bold: true, fontSize: 8, alignment: i >= 3 ? 'right' : 'left' }));
+        const rows = (rep.rows || []).map((r) => [
+            { text: r.date, fontSize: 8 },
+            { text: r.orderUrl ? [linkRun(r.orderId, r.orderUrl)] : r.orderId, fontSize: 8 },
+            { stack: [...r.items.map((it) => ({ text: [{ text: it.title, bold: true }, `\nArtikelnr. ${it.itemId}`] })), { text: `Käufer: ${r.buyer || 'n/a'}`, color: TOKENS.colors.textMuted }], fontSize: 8 },
+            { text: eur(r.revenue), alignment: 'right', fontSize: 8 },
+            { text: eur(r.fees), alignment: 'right', fontSize: 8 },
+            { text: eur(r.total), alignment: 'right', fontSize: 8, bold: true }
+        ]);
+        const sum = (k) => (rep.rows || []).reduce((s, r) => s + (r[k] || 0), 0);
+        const totalRow = [{ text: 'Summe', bold: true, colSpan: 3, fontSize: 8 }, {}, {}, ...['revenue', 'fees', 'total'].map((k) => ({ text: eur(sum(k)), alignment: 'right', bold: true, fontSize: 8 }))];
+
+        const content = [
+            buildTitleBar(`${rep.platformLabel} Verkaufsbericht \u2022 ${rep.periodLabel}`, platform),
+            buildSectionHeader('Transaktionsübersicht', platform, { margin: [0, 4, 0, 4] }),
+            { columns: [{ width: 320, table: { widths: ['*', 100], body: overview }, layout: thinTable }, { width: '*', text: '' }] },
+            buildSectionHeader(`Transaktionsdetails (${(rep.rows || []).length} Bestellungen)`, platform, { margin: [0, 14, 0, 4] }),
+            { table: { headerRows: 1, dontBreakRows: true, widths: [48, 72, '*', 58, 58, 62], body: [head, ...rows, totalRow] }, layout: thinTable }
+        ];
+        return documentShell(`${rep.platformLabel} Verkaufsbericht ${rep.periodLabel}`, 'Verkaufsbericht', rep.scriptLabel, footer, content);
+    }
+
     global.PdfSharedTheme = Object.freeze({
         VERSION: LIB_VERSION,
         isNa,
@@ -1895,7 +2024,8 @@
         formatMoneyText,
         moneyGroupNeedsDecimals,
         sumMoney,
-        normalizeGalleryImageDataUrl,
-        buildExportDocument
+        buildExportDocument,
+        buildInvoiceDocument,
+        buildReportDocument
     });
 })(typeof window !== 'undefined' ? window : globalThis);
