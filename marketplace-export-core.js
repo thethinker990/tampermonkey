@@ -13,7 +13,7 @@
 (function (global) {
     'use strict';
 
-    const VERSION = '3.1.1';
+    const VERSION = '3.2.0';
     const DB_NAME = 'MarketplacePdfExport';
     const DB_VERSION = 2;
     const UI_PREFIX = 'mpe';
@@ -338,16 +338,32 @@
         return CARRIERS.find((c) => c && c.toLowerCase() === s.toLowerCase()) || (s ? detectCarrier('', s) : '');
     }
 
-    const TRACKING_RE = /(?:Sendungsnummer|Sendungnummer|Tracking(?:-?nummer|-?id)?|Paketnummer|Sendungsverfolgung)[^A-Z0-9\n]{0,25}([A-Z0-9]{10,22})\b/i;
+    // Nummer muss mindestens eine Ziffer enthalten (sonst wurde z. B. „unmittelbar“ nach „Sendungsnummer“ erkannt)
+    const TRACKING_RE = /(?:Sendungsnummer|Sendungnummer|Sendungsnr\.?|Tracking(?:-?nummer|-?id)?|Paketnummer|Sendungsverfolgung)[^A-Z0-9\n]{0,25}((?=[A-Z]*\d)[A-Z0-9]{10,22})\b/gi;
+    // Sendungsnummern ohne Stichwort (z. B. aus einem Beleg-Foto): nur eindeutige Formate
+    const BARE_TRACKING_RE = /\b(00\d{18}|\d{20}|\d{14}|\d{12}|A0[0-9A-F]{18}|1Z[A-Z0-9]{16}|[A-Z]{2}\d{9}DE)\b/gi;
 
-    /** Letzte im Chat genannte Sendungsnummer (IBANs ausgeschlossen) inkl. erkanntem Versanddienstleister, sonst null. */
-    function findTrackingNumber(texts) {
-        let found = null;
+    /** Alle Sendungsnummern in Reihenfolge (ohne Dubletten, IBANs ausgeschlossen); bare = auch ohne Stichwort. */
+    function findTrackingNumbers(texts, { bare = false } = {}) {
+        const out = [];
         for (const text of texts) {
-            const m = TRACKING_RE.exec(text || '');
-            if (m && !/^DE\d{18,20}$/i.test(m[1])) found = { id: m[1], carrier: detectCarrier(m[1], text) };
+            const t = String(text || '');
+            const flat = bare ? t.replace(/(\d)[ \t]+(?=\d)/g, '$1') : t;
+            for (const re of bare ? [TRACKING_RE, BARE_TRACKING_RE] : [TRACKING_RE]) {
+                re.lastIndex = 0;
+                for (const m of flat.matchAll(re)) {
+                    const id = m[1].toUpperCase();
+                    if (/^DE\d{18,20}$/.test(id) || out.some((o) => o.id === id)) continue;
+                    out.push({ id, carrier: detectCarrier(id, t) });
+                }
+            }
         }
-        return found;
+        return out;
+    }
+
+    /** Erste im Chat genannte Sendungsnummer (= Versand an den Käufer) inkl. Versanddienstleister, sonst null. */
+    function findTrackingNumber(texts) {
+        return findTrackingNumbers(texts)[0] || null;
     }
 
     const LOCAL_FIELDS = [
@@ -372,6 +388,7 @@
         { key: 'paymentMethod', label: 'Zahlungsart', type: 'select', options: PAYMENT_METHODS.map((p) => [p, p]), cap: 'paymentMethod' },
         { key: 'trackingId', label: 'Sendungsverfolgungsnummer' },
         { key: 'trackingCarrier', label: 'Versanddienstleister', type: 'select', options: CARRIERS.map((c) => [c, c || '–']) },
+        { key: 'returnTrackingId', label: 'Rücksende-Sendungsnummer (leer = keine Rücksendung, „n/a“ = Rücksendung ohne Nummer)' },
         { key: 'buyerName', label: 'Käufername' },
         { key: 'buyerUrl', label: 'Käufer-Link' },
         { key: 'sellerName', label: 'Verkäufername' },
@@ -596,16 +613,16 @@
      * LOKALES LLM (OLLAMA)
      * ========================================================================== */
 
-    async function ollamaGenerate(settings, prompt, { json = false, timeoutMs = 45000 } = {}) {
+    async function ollamaGenerate(settings, prompt, { json = false, timeoutMs = 45000, images = null, model = '' } = {}) {
         try {
             const res = await gmRequest({
                 method: 'POST',
                 url: settings.ollamaUrl,
                 headers: { 'Content-Type': 'application/json' },
-                data: JSON.stringify({ model: settings.ollamaModel, prompt, stream: false, ...(json ? { format: 'json' } : {}), options: { temperature: 0 } }),
+                data: JSON.stringify({ model: model || settings.ollamaModel, prompt, stream: false, ...(images ? { images } : {}), ...(json ? { format: 'json' } : {}), options: { temperature: 0 } }),
                 timeout: timeoutMs
             });
-            if (res.status !== 200) return { ok: false, error: `Ollama HTTP ${res.status}` };
+            if (res.status !== 200) return { ok: false, error: `Ollama HTTP ${res.status}${model ? ` (Modell ${model} installiert?)` : ''}` };
             const outer = JSON.parse(res.text);
             const text = String(outer.response || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
             if (!json) return { ok: true, text };
@@ -613,6 +630,98 @@
         } catch (err) {
             return { ok: false, error: `Ollama nicht erreichbar (${settings.ollamaUrl}): ${err.message || err}` };
         }
+    }
+
+    const TRACKING_HINT_RE = /Sendungsn|Sendungsverfolgung|Tracking|Paketnummer|Einlieferung|Beleg|Quittung|Paketschein|Etikett|Label|verschickt|abgegeben|zur Post/i;
+
+    /**
+     * Sendungsnummern aus Chat-Bildern: nur Bilder in Nachrichten, die selbst oder deren direkte Nachbarn auf einen
+     * Versand hinweisen (spart Zeit). Reihenfolge = Chatreihenfolge. Ollama-Vision, Fallback Tesseract.js (falls geladen).
+     * Rückgabe { found: [{id, carrier, source}], warnings: [] }.
+     */
+    async function findTrackingInImages(messages, settings) {
+        const warnings = [];
+        const found = [];
+        const msgs = messages.filter((m) => m.kind === 'text');
+        const targets = [];
+        msgs.forEach((m, i) => {
+            if (!m.images || !m.images.length) return;
+            const near = [msgs[i - 1], m, msgs[i + 1]].some((x) => x && TRACKING_HINT_RE.test(x.text || ''));
+            if (near) targets.push(...m.images.filter((img) => img.dataUrl).map((img) => ({ img, msg: m })));
+        });
+        if (!targets.length) return { found, warnings };
+        let visionOk = Boolean(settings.useLlm && settings.ollamaVisionModel);
+        let tesseract = null;
+        const prompt = 'Lies alle Sendungsnummern/Tracking-Nummern (Paketnummern von DHL, Deutsche Post, Hermes, DPD, GLS, UPS) auf diesem Bild ab. ' +
+            'Antworte NUR als JSON {"trackingIds": ["..."], "carrier": "DHL|Deutsche Post|Hermes|DPD|GLS|UPS|"}. Keine Nummer erkennbar: {"trackingIds": []}. Nichts erfinden.';
+        for (const { img, msg } of targets.slice(0, 12)) {
+            let ids = [];
+            if (visionOk) {
+                const r = await ollamaGenerate(settings, prompt, { json: true, timeoutMs: 120000, images: [img.dataUrl.replace(/^data:[^,]+,/, '')], model: settings.ollamaVisionModel });
+                if (r.ok) ids = (r.data.trackingIds || []).map((s) => String(s).replace(/\s+/g, '').toUpperCase()).filter((s) => /\d/.test(s) && s.length >= 10 && s.length <= 22);
+                else {
+                    visionOk = false;
+                    warnings.push(`Bild-Erkennung per Ollama-Vision nicht möglich (${r.error}) – Fallback Texterkennung`);
+                }
+            }
+            if (!visionOk && global.Tesseract) {
+                try {
+                    tesseract = tesseract || (await global.Tesseract.createWorker('deu+eng'));
+                    const { data } = await tesseract.recognize(img.dataUrl);
+                    ids = findTrackingNumbers([data.text], { bare: true }).map((t) => t.id);
+                } catch (err) {
+                    warnings.push(`Texterkennung (Tesseract.js) fehlgeschlagen: ${err.message || err}`);
+                    break;
+                }
+            }
+            for (const id of ids) if (!found.some((f) => f.id === id)) found.push({ id, carrier: detectCarrier(id), source: img.filename, message: msg });
+        }
+        if (tesseract) await tesseract.terminate().catch(() => {});
+        if (!visionOk && !global.Tesseract) warnings.push('Sendungsnummern in Bildern nicht geprüft (weder Ollama-Vision noch Tesseract.js verfügbar)');
+        return { found, warnings };
+    }
+
+    /**
+     * Alle Sendungsnummern in Chatreihenfolge: Systemnachricht (z. B. Versandetikett der Plattform), Text, Bild.
+     * Die erste ist der Versand an den Käufer; spätere sind Kandidaten für eine Rücksendung.
+     */
+    function orderTrackingCandidates(messages, imageHits = []) {
+        const out = [];
+        const add = (id, carrier, source) => {
+            if (id && !isNa(id) && !out.some((o) => o.id === id)) out.push({ id, carrier: carrier || detectCarrier(id), source });
+        };
+        for (const m of messages) {
+            if (m.trackingId) add(m.trackingId, m.trackingCarrier, 'Systemnachricht');
+            if (m.kind === 'text') for (const t of findTrackingNumbers([m.text])) add(t.id, t.carrier, 'Chat');
+            for (const h of imageHits.filter((x) => x.message === m)) add(h.id, h.carrier, `Bild ${h.source}`);
+        }
+        return out;
+    }
+
+    /**
+     * Rücksendung erkennen (lokales LLM). candidates = Sendungsnummern in Chatreihenfolge (erste = Versand an den Käufer).
+     * Rückgabe '' (keine Rücksendung), Sendungsnummer oder 'n/a' (Rücksendung ohne Nummer); null = nicht prüfbar.
+     */
+    async function detectReturn(settings, messages, candidates) {
+        if (!settings.useLlm) return { value: null };
+        const lines = messages.filter((m) => m.text).map((m) => `[${m.timestamp || m.date || ''}] ${m.isOwn ? 'Ich' : 'Partner'}: ${m.text}`);
+        // Ohne jedes Rücksende-Stichwort kein LLM-Aufruf (spart Zeit bei normalen Chats)
+        if (!lines.length || !/zurück(?:send|schick|geschick|gesandt|gesendet)|rücksend|retoure|rückgabe|return/i.test(lines.join('\n'))) return { value: '' };
+        const prompt = [
+            'Wurde in diesem Marktplatz-Chat der gekaufte Artikel (oder ein Teil davon) an den Verkäufer ZURÜCKGESCHICKT bzw. eine Rücksendung tatsächlich durchgeführt?',
+            'Nur Ankündigungen/Angebote ohne Durchführung zählen nicht. Erfinde nichts.',
+            `Bekannte Sendungsnummern in Chatreihenfolge: ${candidates.length ? candidates.join(', ') : 'keine'}. Die erste ist normalerweise der Versand an den Käufer.`,
+            'Antworte NUR als JSON {"returned": true|false, "returnTrackingId": "<Nummer aus der Liste oder aus dem Chat>" | "n/a"}.',
+            '',
+            ...lines
+        ].join('\n');
+        const r = await ollamaGenerate(settings, prompt, { json: true, timeoutMs: 90000 });
+        if (!r.ok) return { value: null, error: r.error };
+        if (!r.data.returned) return { value: '' };
+        const id = String(r.data.returnTrackingId || '').replace(/\s+/g, '').toUpperCase();
+        const known = candidates.includes(id) || lines.some((l) => l.replace(/\s+/g, '').toUpperCase().includes(id));
+        if (id && /\d/.test(id) && known && id !== candidates[0]) return { value: id };
+        return { value: candidates[1] || 'n/a' };
     }
 
     /* ==========================================================================
@@ -1145,6 +1254,7 @@
         { key: 'deeplKey', label: 'DeepL-API-Key', type: 'password' },
         { key: 'ollamaUrl', label: 'Ollama-Endpunkt' },
         { key: 'ollamaModel', label: 'Ollama-Modell' },
+        { key: 'ollamaVisionModel', label: 'Ollama-Vision-Modell für Sendungsnummern in Bildern (leer = nur Tesseract.js)' },
         { key: 'deliveryMode', label: 'Nach dem Erstellen', type: 'select', options: [['download', 'Nur herunterladen'], ['open', 'Nur im Tab öffnen'], ['both', 'Herunterladen und öffnen']] },
         { key: 'useLlm', label: 'Lokales LLM (Ollama) als Fallback/Analyse nutzen', type: 'checkbox' },
         { key: 'attachOriginals', label: 'Originalbilder als PDF-Anhang einbetten', type: 'checkbox' },
@@ -1156,6 +1266,7 @@
         deeplKey: '',
         ollamaUrl: 'http://127.0.0.1:11434/api/generate',
         ollamaModel: 'qwen2.5:7b',
+        ollamaVisionModel: 'qwen3-vl:8b',
         deliveryMode: 'download',
         useLlm: true,
         attachOriginals: true,
@@ -1186,6 +1297,9 @@
             m.trackingCarrier = normalizeCarrier(m.trackingCarrier) || (isNa(m.trackingId) ? '' : detectCarrier(m.trackingId));
             if (!isNa(m.trackingId) && CARRIER_TRACKING_URLS[m.trackingCarrier]) m.trackingUrl = CARRIER_TRACKING_URLS[m.trackingCarrier](m.trackingId);
             else m.trackingUrl = '';
+            m.returnTrackingId = String(m.returnTrackingId || '').trim();
+            m.returnTrackingCarrier = m.returnTrackingId && !isNa(m.returnTrackingId) ? detectCarrier(m.returnTrackingId) : '';
+            m.returnTrackingUrl = CARRIER_TRACKING_URLS[m.returnTrackingCarrier] ? CARRIER_TRACKING_URLS[m.returnTrackingCarrier](m.returnTrackingId) : '';
             return config.adapter.finalizeMeta ? config.adapter.finalizeMeta(m, store.get()) : m;
         }
 
@@ -1561,7 +1675,9 @@
             openSettings,
             createToolbar,
             createInvoice,
-            ollamaGenerate: (prompt, opts) => ollamaGenerate(store.get(), prompt, opts)
+            ollamaGenerate: (prompt, opts) => ollamaGenerate(store.get(), prompt, opts),
+            findTrackingInImages: (messages) => findTrackingInImages(messages, store.get()),
+            detectReturn: (messages, candidates) => detectReturn(store.get(), messages, candidates)
         };
         return api;
     }
@@ -1585,6 +1701,8 @@
         toast,
         detectCarrier,
         findTrackingNumber,
+        findTrackingNumbers,
+        orderTrackingCandidates,
         PAYMENT_METHODS,
         toCents,
         computeOrderAmounts,

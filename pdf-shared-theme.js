@@ -1,19 +1,19 @@
 /**
  * PdfSharedTheme – gemeinsame Design-, Layout- & Komponenten-Bibliothek (pdfmake) für alle
  * Marktplatz-PDF-Exporter (eBay, Kleinanzeigen, später z. B. Vinted).
- * Version: 3.1.1
+ * Version: 3.2.0
  *
  * Verantwortung: NUR Darstellung. Plattform-Adapter liefern ein einheitliches Datenmodell
  * (siehe specs/001-marketplace-pdf-export/plan.md "Data Model"), diese Bibliothek baut daraus das komplette PDF-Dokument
  * (buildExportDocument, buildInvoiceDocument, buildReportDocument). Ablauf/DB/Settings/Toast liegen in marketplace-export-core.js.
  *
  * Einbindung (Versions-Parameter erzwingt Neuladen aus dem Tampermonkey-Cache):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-shared-theme.js?v=3.1.1
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-shared-theme.js?v=3.2.0
  */
 (function (global) {
     'use strict';
 
-    const LIB_VERSION = '3.1.1';
+    const LIB_VERSION = '3.2.0';
 
     const MONTH_SHORT_DE = Object.freeze([
         'Jan.', 'Feb.', 'Mär.', 'Apr.', 'Mai', 'Jun.',
@@ -23,7 +23,6 @@
     /** Einheitliche Feldbezeichnungen (ohne Doppelpunkt) für alle Plattformen. */
     const META_LABELS = Object.freeze({
         SOURCE: 'Quelle',
-        CREATED_WITH: 'Erstellt mit',
         AD_ID: 'Anzeigen-ID',
         CONV_ID: 'Nachrichten-ID',
         ORDER_ID: 'Bestellnummer',
@@ -44,6 +43,7 @@
         TOTAL_AMOUNT: 'Gesamtbetrag',
         PAYMENT_METHOD: 'Zahlungsart',
         TRACKING_ID: 'Sendungsverfolgungsnummer',
+        RETURN_TRACKING_ID: 'Rücksende-Sendungsnummer',
         REFUND: 'Rückerstattung',
         TRANSACTION_FEE: 'Transaktionsgebühren',
         AD_FEE: 'Anzeigengebühr',
@@ -51,7 +51,7 @@
         EARNINGS: 'Erlös',
         LISTING_DURATION: 'Angebotsdauer',
         PICKUP: 'Abholung',
-        EXPORTED_AT: 'Exportiert / Erstellt am'
+        EXPORTED_AT: 'Erstellt am'
     });
 
     const TOKENS = Object.freeze({
@@ -941,21 +941,32 @@
         const decimals = moneyGroupNeedsDecimals(values);
         let prefixW = 0;
         let amountW = 0;
+        let numW = 0;
         for (const m of values.map(parseMoney)) {
             if (m.special) continue;
             if (m.prefix) prefixW = Math.max(prefixW, Math.ceil(measureTextWidthPt(`${m.prefix}  `, fs, true) * 1.1));
             amountW = Math.max(amountW, Math.ceil(measureTextWidthPt(formatEuroNumber(m.cents, decimals), fs, true) * 1.1) + 1);
+            numW = Math.max(numW, measureTextWidthPt(formatEuroNumber(m.cents, decimals), fs, false));
         }
-        return { decimals, prefixW, amountW };
+        // numStart: Abstand von der Spaltenkante bis zur ersten Ziffer des breitesten (normal gesetzten) Betrags
+        return { decimals, prefixW, amountW, numStart: Math.max(0, amountW - numW) };
     }
 
-    /** Tabellenzelle "VB | 10,00 | EUR" – als Block linksbündig, freier Platz bleibt rechts. */
+    /**
+     * Tabellenzelle "VB | 10,00 | EUR" – als Block linksbündig, freier Platz bleibt rechts.
+     * Sondertexte ("n/a", "Kostenlos") beginnen an der linken Kante der Betragsspalte – bündig mit der ersten Ziffer
+     * des breitesten Betrags der Gruppe.
+     */
     function buildMoneyCell(raw, layout, bold = false) {
         const m = parseMoney(raw);
-        if (m.special) return { text: m.special, bold };
-        const num = formatEuroNumber(m.cents, layout.decimals);
         const columns = [];
-        if (layout.prefixW) columns.push({ width: layout.prefixW, text: m.prefix || '', bold });
+        if (layout.prefixW) columns.push({ width: layout.prefixW, text: m.special ? '' : m.prefix || '', bold });
+        if (m.special) {
+            if (!layout.amountW) return { text: m.special, bold };
+            columns.push({ width: '*', text: m.special, bold, margin: [layout.numStart || 0, 0, 0, 0] });
+            return { columns, columnGap: 0, __plain: m.special };
+        }
+        const num = formatEuroNumber(m.cents, layout.decimals);
         columns.push({ width: layout.amountW, text: num, alignment: 'right', bold }, { width: '*', text: 'EUR', margin: [3, 0, 0, 0], bold });
         return { columns, columnGap: 0, __plain: `${m.prefix ? `${m.prefix} ` : ''}${num} EUR` };
     }
@@ -1164,9 +1175,9 @@
         return `${p2(date.getDate())}.${p2(date.getMonth() + 1)}.${date.getFullYear()} ${p2(date.getHours())}:${p2(date.getMinutes())}:${p2(date.getSeconds())} ${tzShort} (${tzIana})`;
     }
 
-    function buildExportedAtNode(exportedAtStr) {
+    function buildExportedAtNode(exportedAtStr, scriptLabel = '') {
         return {
-            text: `${META_LABELS.EXPORTED_AT} ${exportedAtStr || formatExportTimestamp()}`,
+            text: `${META_LABELS.EXPORTED_AT} ${exportedAtStr || formatExportTimestamp()}${scriptLabel ? ` mit ${scriptLabel}` : ''}`,
             alignment: 'right',
             fontSize: TOKENS.typography.exportTimestampSize,
             bold: true,
@@ -1199,7 +1210,6 @@
             [L.CONV_ID, linkOrText(meta.conversationId, meta.conversationUrl)],
             caps.orderId ? [L.ORDER_ID, linkOrText(meta.orderId, meta.orderUrl)] : null,
             [L.SOURCE, model.platformLabel || 'n/a'],
-            [L.CREATED_WITH, model.scriptLabel || 'n/a'],
             [L.CATEGORY, meta.category || 'n/a'],
             [L.AD_TYPE, meta.adType || 'n/a']
         ];
@@ -1223,13 +1233,17 @@
             ? [meta.price, meta.shipping, neg(meta.refund), agreedTotal, neg(meta.transactionFee), neg(meta.adFee), neg(meta.shippingActual), earnings]
             : [meta.price, meta.shipping, showFee ? meta.buyerProtection : null, agreedTotal].filter((v) => v !== null);
         const layout = moneyLayout([...leftValues, ...rightValues]);
-        const cell = (v, bold = false) => buildMoneyCell(v || 'n/a', layout, bold);
+        // Tabelle ganz ohne Beträge (z. B. Anzeige gelöscht: alles n/a) bleibt schlicht linksbündig
+        const layoutFor = (vals) => (vals.some((v) => v !== null && parseMoney(v).cents !== null) ? layout : { ...layout, prefixW: 0, amountW: 0 });
+        const leftLayout = layoutFor(leftValues);
+        const rightLayout = layoutFor(rightValues);
 
         const leftRows = [
-            [L.LISTED_PRICE, cell(meta.listedPrice)],
-            [L.LISTED_SHIPPING, cell(meta.listedShipping)],
-            [L.LISTED_TOTAL, cell(listedTotal, true)]
+            [L.LISTED_PRICE, buildMoneyCell(meta.listedPrice || 'n/a', leftLayout)],
+            [L.LISTED_SHIPPING, buildMoneyCell(meta.listedShipping || 'n/a', leftLayout)],
+            [L.LISTED_TOTAL, buildMoneyCell(listedTotal || 'n/a', leftLayout, true)]
         ];
+        const cell = (v, bold = false) => buildMoneyCell(v || 'n/a', rightLayout, bold);
         const rightRows = [
             [qty > 1 ? `${L.AGREED_PRICE} (${qty} Stück)` : L.AGREED_PRICE, cell(meta.price)],
             [L.AGREED_SHIPPING, cell(meta.shipping)],
@@ -1245,13 +1259,25 @@
         const gap = TOKENS.table.priceBlockGapPt;
         const halfWidth = Math.floor((width - gap) / 2);
         const halfLabel = Math.round(halfWidth * 0.52);
-        const left = buildMetaTable(leftRows, { startIndex: idx, width: halfWidth, labelWidth: halfLabel });
-        const right = buildMetaTable(rightRows, { startIndex: idx, width: halfWidth, labelWidth: halfLabel });
-        idx += Math.max(rowCountOf(left), rowCountOf(right));
+        // eBay: Anzeige- und Kaufpreis nur getrennt, wenn es einen Preisvorschlag gab; sonst ein Block
+        // (mit Kaufdaten, falls vorhanden, sonst die Anzeigenpreise).
+        let priceBlock;
+        if (caps.priceComparisonOnlyWithOffer && !meta.hasOffer) {
+            const hasDealPrice = !isNa(meta.price) || fees;
+            const single = buildMetaTable(hasDealPrice ? rightRows : leftRows, { startIndex: idx, width });
+            idx += rowCountOf(single);
+            priceBlock = { stack: [single], margin: [0, 6, 0, 6] };
+        } else {
+            const left = buildMetaTable(leftRows, { startIndex: idx, width: halfWidth, labelWidth: halfLabel });
+            const right = buildMetaTable(rightRows, { startIndex: idx, width: halfWidth, labelWidth: halfLabel });
+            idx += Math.max(rowCountOf(left), rowCountOf(right));
+            priceBlock = { columns: [{ width: halfWidth, stack: [left] }, { width: gap, text: '' }, { width: halfWidth, stack: [right] }], columnGap: 0, margin: [0, 6, 0, 6] };
+        }
 
         const bottomRows = [
             caps.paymentMethod ? [L.PAYMENT_METHOD, { text: meta.paymentMethod || 'n/a', bold: !isNa(meta.paymentMethod) }] : null,
             [L.TRACKING_ID, isNa(meta.trackingId) ? 'n/a' : buildLinkCell(meta.trackingId, meta.trackingUrl || '', meta.trackingCarrier || '')],
+            meta.returnTrackingId ? [L.RETURN_TRACKING_ID, isNa(meta.returnTrackingId) ? 'n/a' : buildLinkCell(meta.returnTrackingId, meta.returnTrackingUrl || '', meta.returnTrackingCarrier || '')] : null,
             [L.CREATED_DATE, formatDateWithRelativeAge(meta.createdAt, 'days')],
             [L.BUYER_NAME, linkOrText(meta.buyerName, meta.buyerUrl)],
             [L.SELLER_NAME, linkOrText(meta.sellerName, meta.sellerUrl)],
@@ -1263,9 +1289,9 @@
         return {
             stack: [
                 top,
-                { columns: [{ width: halfWidth, stack: [left] }, { width: gap, text: '' }, { width: halfWidth, stack: [right] }], columnGap: 0, margin: [0, 6, 0, 6] },
+                priceBlock,
                 bottom,
-                buildExportedAtNode(model.exportedAt)
+                buildExportedAtNode(model.exportedAt, model.scriptLabel)
             ]
         };
     }
@@ -1289,7 +1315,6 @@
         const rows = [
             [L.AD_ID, linkOrText(meta.adId, meta.adUrl)],
             [L.SOURCE, model.platformLabel || 'n/a'],
-            [L.CREATED_WITH, model.scriptLabel || 'n/a'],
             [L.CATEGORY, meta.category || 'n/a'],
             [L.AD_TYPE, meta.adType || 'n/a'],
             [L.LISTED_PRICE, buildMoneyCell(meta.listedPrice || 'n/a', layout)],
@@ -1312,7 +1337,7 @@
             const attrTable = buildMetaTable(attrs.map((a) => [a.name, a.value]), { startIndex: rowCountOf(table), width });
             stack.push(keepTogether([buildSectionHeader('Artikelmerkmale', model.platform, { margin: [0, 12, 0, 6] }), attrTable], false));
         }
-        stack.push(buildExportedAtNode(model.exportedAt));
+        stack.push(buildExportedAtNode(model.exportedAt, model.scriptLabel));
         return { stack };
     }
 
@@ -1616,6 +1641,19 @@
         return { text: buildRichTextWithEmojis(text), fontSize: TOKENS.typography.messageTimestampSize, color: TOKENS.colors.textTimestamp, alignment, margin };
     }
 
+    // Kreis mit Ausrufezeichen (Fallback, falls die Seite kein eigenes Icon liefert)
+    const WARNING_ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><rect x="11" y="7" width="2" height="7" rx="1" fill="currentColor"/><circle cx="12" cy="16.5" r="1.2" fill="currentColor"/></svg>';
+
+    /** Warnzeile unter einer Nachricht: Icon + Text + optional klickbarer Link (z. B. Kleinanzeigen "Achtung, Sicherheitsrisiko! Warum?"). */
+    function buildMessageWarningNode(warning, isOwn) {
+        const color = TOKENS.colors.textWarning;
+        const svg = String(warning.iconSvg || WARNING_ICON_SVG).replace(/currentColor/g, color);
+        const runs = [{ text: `${warning.text}${warning.linkText ? ' ' : ''}` }];
+        if (warning.linkText) runs.push(warning.url ? { text: warning.linkText, link: warning.url, decoration: 'underline' } : { text: warning.linkText, decoration: 'underline' });
+        const parts = [{ svg, width: 9, height: 9, margin: [0, 0.5, 0, 0] }, { width: 'auto', text: runs, fontSize: 8, bold: true, color }];
+        return { columns: isOwn ? [{ width: '*', text: '' }, ...parts] : parts, columnGap: 3, margin: [2, 2, 2, 0] };
+    }
+
     /** Eine Chat-Zeile (Bubble + Avatar + Zeitstempel) – unzerbrechlich. */
     function buildChatMessageRow(msg, options = {}) {
         const platform = options.platform || 'auto';
@@ -1625,9 +1663,7 @@
         const content = TOKENS.page.contentWidthPt;
 
         const sub = [];
-        if (msg.warningText) {
-            sub.push({ text: buildRichTextWithEmojis(msg.warningText), fontSize: 8, bold: true, color: TOKENS.colors.textWarning, alignment: isOwn ? 'right' : 'left', margin: [2, 2, 2, 0] });
-        }
+        if (msg.warning && msg.warning.text) sub.push(buildMessageWarningNode(msg.warning, isOwn));
         const ts = normalizeMessageTimestamp(msg.timestamp, msg.date || options.fallbackDate || '');
         const tsLabel = [ts, msg.subtext].filter(Boolean).join(' · ');
         if (tsLabel) sub.push(buildMessageSubtextNode(tsLabel, isOwn ? 'right' : 'left'));
@@ -1707,8 +1743,8 @@
         if (!notice) return null;
         const theme = getTheme(platform);
         if (notice.style === 'plain') {
-            // eBay: schlichter, hellgrauer Hinweistext ohne Rahmen (wie im Original)
-            return { text: buildRunsNode(notice.runs), fontSize: 8, color: TOKENS.colors.textTimestamp, lineHeight: 1.25, margin: [0, 2, 0, 10] };
+            // eBay: schlichter, hellgrauer Hinweistext ohne Rahmen, zentriert (wie im Original)
+            return { text: buildRunsNode(notice.runs), fontSize: 8, color: TOKENS.colors.textTimestamp, lineHeight: 1.25, alignment: 'center', margin: [0, 2, 0, 10] };
         }
         const width = TOKENS.page.contentWidthPt;
         const stack = [];
