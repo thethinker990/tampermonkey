@@ -1,11 +1,11 @@
 /**
  * PdfSharedTheme – Artikel-Stylesheet: Anzeigen-Meta, Artikelmerkmale, Beschreibung.
- * Version: 4.0.0
+ * Version: 4.2.0
  *
  * Baut die Artikel-/Anzeigenseite des Chat-PDFs; setzt pdf-style-core.js voraus.
  *
  * Einbindung (Reihenfolge: core, article, chat, invoice; Versions-Parameter erzwingt Neuladen aus dem Tampermonkey-Cache):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-article.js?v=4.0.0
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-article.js?v=4.2.0
  */
 (function (global) {
     'use strict';

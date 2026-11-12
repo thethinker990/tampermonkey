@@ -1,18 +1,18 @@
 /**
  * PdfSharedTheme – Core-Stylesheet (pdfmake) für alle Marktplatz-PDFs: Tokens, Schriften, Emojis, Datum, Geld, Links, Tabellen, Galerie, Fußzeile.
- * Version: 4.0.0
+ * Version: 4.2.0
  *
  * Wird von pdf-style-article.js (Artikel), pdf-style-chat.js (Nachrichten) und pdf-style-invoice.js (Rechnung, Berichte) genutzt.
  * Öffentliche Funktionen hängen an window.PdfSharedTheme, gemeinsame Bausteine für die anderen Stylesheets an window.PdfSharedTheme._ .
  * Ablauf/DB/Settings/Toast liegen in marketplace-export-core.js; Datenmodell siehe specs/001-marketplace-pdf-export/plan.md.
  *
  * Einbindung (Reihenfolge: core, article, chat, invoice; Versions-Parameter erzwingt Neuladen aus dem Tampermonkey-Cache):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-core.js?v=4.0.0
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-core.js?v=4.2.0
  */
 (function (global) {
     'use strict';
 
-    const LIB_VERSION = '4.0.0';
+    const LIB_VERSION = '4.2.0';
 
     const MONTH_SHORT_DE = Object.freeze([
         'Jan.', 'Feb.', 'Mär.', 'Apr.', 'Mai', 'Jun.',

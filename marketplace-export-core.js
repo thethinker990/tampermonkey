@@ -1,24 +1,202 @@
 /**
  * MarketplaceExportCore – gemeinsame Ablauf-Bibliothek für alle Marktplatz-PDF-Exporter.
- * Version: 4.0.0
+ * Version: 4.2.0
  *
  * Verantwortung: Export-Pipeline, IndexedDB (Overrides je Konversation), Einstellungs-/Feld-Popup,
  * Toasts, HTTP/Bilder, Übersetzung (DeepL -> lokales LLM), Ollama-Client, PDF-Auslieferung.
  * Darstellung macht PdfSharedTheme (pdf-style-*.js), Seiten-Auslesen der jeweilige Adapter.
  *
  * Einbindung (Reihenfolge: pdfmake, vfs_fonts, pdf-lib, [xlsx], pdf-style-core, -article, -chat, [-invoice], Core):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/marketplace-export-core.js?v=4.0.0
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/marketplace-export-core.js?v=4.2.0
  * Benötigte Grants im Userscript: GM_xmlhttpRequest, GM_getValue, GM_setValue, GM_listValues
  */
 (function (global) {
     'use strict';
 
-    const VERSION = '4.0.0';
+    const VERSION = '4.2.0';
     const DB_NAME = 'MarketplacePdfExport';
-    const DB_VERSION = 2;
+    const DB_VERSION = 3;
     const UI_PREFIX = 'mpe';
     const Theme = global.PdfSharedTheme;
     if (!Theme || !Theme.buildExportDocument) throw new Error('pdf-style-core.js, pdf-style-article.js und pdf-style-chat.js müssen vor marketplace-export-core.js per @require geladen werden');
+
+    function flattenValues(value, path = [], out = []) {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+            for (const [key, child] of Object.entries(value)) flattenValues(child, [...path, key], out);
+        } else {
+            out.push({ path, value });
+        }
+        return out;
+    }
+
+    function setPathValue(target, path, value) {
+        let node = target;
+        for (const key of path.slice(0, -1)) {
+            if (key === '__proto__' || key === 'prototype' || key === 'constructor') throw new Error(`Unsicherer Feldpfad: ${key}`);
+            if (!Object.prototype.hasOwnProperty.call(node, key) || !node[key] || typeof node[key] !== 'object' || Array.isArray(node[key])) node[key] = {};
+            node = node[key];
+        }
+        if (path.length) {
+            const key = path[path.length - 1];
+            if (key === '__proto__' || key === 'prototype' || key === 'constructor') throw new Error(`Unsicherer Feldpfad: ${key}`);
+            node[key] = value;
+        }
+    }
+
+    function mergeArticleValues(oldData, incomingData) {
+        const oldValues = flattenValues(oldData);
+        const newValues = flattenValues(incomingData);
+        const oldByPath = new Map(oldValues.map((x) => [JSON.stringify(x.path), x.value]));
+        const conflicts = newValues.filter((x) => {
+            const key = JSON.stringify(x.path);
+            return oldByPath.has(key) && isKnown(oldByPath.get(key)) && isKnown(x.value) && JSON.stringify(oldByPath.get(key)) !== JSON.stringify(x.value);
+        });
+        const result = typeof structuredClone === 'function' ? structuredClone(incomingData) : JSON.parse(JSON.stringify(incomingData));
+        const newByPath = new Map(newValues.map((x) => [JSON.stringify(x.path), x.value]));
+        for (const { path, value } of oldValues) {
+            if (isKnown(value) && !isKnown(newByPath.get(JSON.stringify(path)))) setPathValue(result, path, value);
+        }
+        return { result, conflicts, oldByPath };
+    }
+
+    function openConflictPreview(oldData, incomingData) {
+        const { result, conflicts, oldByPath } = mergeArticleValues(oldData, incomingData);
+        if (!conflicts.length) return Promise.resolve(result);
+        return new Promise((resolve) => {
+            const overlay = document.createElement('div');
+            overlay.className = `${UI_PREFIX}-overlay`;
+            const modal = document.createElement('div');
+            modal.className = `${UI_PREFIX}-modal ${UI_PREFIX}-modal--wide`;
+            const title = document.createElement('h3');
+            title.textContent = 'Änderungen vergleichen';
+            const hint = document.createElement('p');
+            hint.className = `${UI_PREFIX}-hint`;
+            hint.textContent = 'Wähle für jedes geänderte Feld den alten oder den eingehenden Wert. Erst „Speichern“ übernimmt die Auswahl.';
+            const table = document.createElement('table');
+            table.className = `${UI_PREFIX}-rates-table`;
+            const header = document.createElement('tr');
+            for (const text of ['Feld', 'Alt', 'Neu', 'Behalten']) {
+                const th = document.createElement('th');
+                th.textContent = text;
+                header.appendChild(th);
+            }
+            table.appendChild(header);
+            const choices = [];
+            const display = (value) => typeof value === 'string' ? value : JSON.stringify(value);
+            for (const item of conflicts) {
+                const key = JSON.stringify(item.path);
+                const row = document.createElement('tr');
+                const name = document.createElement('td');
+                name.textContent = item.path.join('.');
+                const oldCell = document.createElement('td');
+                oldCell.textContent = display(oldByPath.get(key));
+                const newCell = document.createElement('td');
+                newCell.textContent = display(item.value);
+                const selectCell = document.createElement('td');
+                const select = document.createElement('select');
+                select.setAttribute('aria-label', `${item.path.join('.')} behalten`);
+                for (const [value, text] of [['', 'Auswählen…'], ['old', 'Alt'], ['new', 'Neu']]) {
+                    const option = document.createElement('option');
+                    option.value = value;
+                    option.textContent = text;
+                    select.appendChild(option);
+                }
+                selectCell.appendChild(select);
+                row.append(name, oldCell, newCell, selectCell);
+                table.appendChild(row);
+                choices.push({ item, select });
+            }
+            const buttons = document.createElement('div');
+            buttons.className = `${UI_PREFIX}-buttons`;
+            const save = document.createElement('button');
+            save.type = 'button';
+            save.className = `${UI_PREFIX}-btn`;
+            save.textContent = 'Speichern';
+            save.disabled = true;
+            const cancel = document.createElement('button');
+            cancel.type = 'button';
+            cancel.className = `${UI_PREFIX}-btn ${UI_PREFIX}-btn--ghost`;
+            cancel.textContent = 'Abbrechen';
+            const close = (value) => {
+                overlay.remove();
+                resolve(value);
+            };
+            const updateSaveState = () => { save.disabled = choices.some((x) => !x.select.value); };
+            choices.forEach((x) => x.select.addEventListener('change', updateSaveState));
+            save.addEventListener('click', () => {
+                for (const { item, select } of choices) {
+                    if (select.value === 'old') setPathValue(result, item.path, oldByPath.get(JSON.stringify(item.path)));
+                }
+                close(result);
+            });
+            cancel.addEventListener('click', () => close(null));
+            buttons.append(cancel, save);
+            modal.append(title, hint, table, buttons);
+            overlay.appendChild(modal);
+            overlay.addEventListener('click', (event) => { if (event.target === overlay) close(null); });
+            document.body.appendChild(overlay);
+        });
+    }
+
+    function openMediaConflict(oldMedia, newMedia) {
+        return new Promise((resolve) => {
+            const overlay = document.createElement('div');
+            overlay.className = `${UI_PREFIX}-overlay`;
+            const modal = document.createElement('div');
+            modal.className = `${UI_PREFIX}-modal ${UI_PREFIX}-modal--wide`;
+            const title = document.createElement('h3');
+            title.textContent = 'Bilddatei vergleichen';
+            const table = document.createElement('table');
+            table.className = `${UI_PREFIX}-rates-table`;
+            const row = document.createElement('tr');
+            for (const text of ['Stand', 'Dateiname', 'Byte-Größe', 'SHA-256']) {
+                const th = document.createElement('th');
+                th.textContent = text;
+                row.appendChild(th);
+            }
+            table.appendChild(row);
+            for (const [label, media] of [['Alt', oldMedia], ['Neu', newMedia]]) {
+                const tr = document.createElement('tr');
+                for (const value of [label, media.filename, String(media.sizeBytes), media.sha256]) {
+                    const td = document.createElement('td');
+                    td.textContent = value;
+                    tr.appendChild(td);
+                }
+                table.appendChild(tr);
+            }
+            const choiceLabel = document.createElement('label');
+            choiceLabel.className = `${UI_PREFIX}-field`;
+            choiceLabel.textContent = 'Zu behaltende Datei';
+            const select = document.createElement('select');
+            for (const [value, text] of [['', 'Auswählen…'], ['old', 'Alt'], ['new', 'Neu']]) {
+                const option = document.createElement('option');
+                option.value = value;
+                option.textContent = text;
+                select.appendChild(option);
+            }
+            choiceLabel.appendChild(select);
+            const buttons = document.createElement('div');
+            buttons.className = `${UI_PREFIX}-buttons`;
+            const cancel = document.createElement('button');
+            cancel.type = 'button';
+            cancel.className = `${UI_PREFIX}-btn ${UI_PREFIX}-btn--ghost`;
+            cancel.textContent = 'Abbrechen';
+            const save = document.createElement('button');
+            save.type = 'button';
+            save.className = `${UI_PREFIX}-btn`;
+            save.textContent = 'Speichern';
+            save.disabled = true;
+            select.addEventListener('change', () => { save.disabled = !select.value; });
+            const close = (value) => { overlay.remove(); resolve(value); };
+            cancel.addEventListener('click', () => close(null));
+            save.addEventListener('click', () => close(select.value));
+            buttons.append(cancel, save);
+            modal.append(title, table, choiceLabel, buttons);
+            overlay.appendChild(modal);
+            overlay.addEventListener('click', (event) => { if (event.target === overlay) close(null); });
+            document.body.appendChild(overlay);
+        });
+    }
 
     /* ==========================================================================
      * HILFSFUNKTIONEN
@@ -259,6 +437,10 @@
                 if (!db.objectStoreNames.contains('cache')) db.createObjectStore('cache', { keyPath: 'key' });
                 if (!db.objectStoreNames.contains('orders')) db.createObjectStore('orders', { keyPath: 'orderId' });
                 if (!db.objectStoreNames.contains('config')) db.createObjectStore('config', { keyPath: 'key' });
+                if (!db.objectStoreNames.contains('articles')) db.createObjectStore('articles', { keyPath: 'articleId' });
+                if (!db.objectStoreNames.contains('media')) db.createObjectStore('media', { keyPath: 'mediaId' });
+                if (!db.objectStoreNames.contains('syncOutbox')) db.createObjectStore('syncOutbox', { keyPath: 'operationId' });
+                if (!db.objectStoreNames.contains('unmappedFields')) db.createObjectStore('unmappedFields', { keyPath: 'id' });
             };
             req.onsuccess = () => {
                 const db = req.result;
@@ -281,13 +463,14 @@
      * Website-Daten und jeden Versionswechsel). Gelesen wird zuerst IndexedDB; fehlt dort etwas, kommt es aus dem
      * Spiegel und wird zurückgeschrieben. Daten werden nie verworfen – Schema-Änderungen nur ergänzend.
      */
-    const STORE_KEYS = { records: 'key', cache: 'key', orders: 'orderId', config: 'key' };
+    const STORE_KEYS = { records: 'key', cache: 'key', orders: 'orderId', config: 'key', articles: 'articleId', media: 'mediaId', syncOutbox: 'operationId', unmappedFields: 'id' };
     const gmKey = (store, id) => `mpe:${store}:${id}`;
+    const MIRROR_EXCLUDED_STORES = new Set(['media']);
     const hasGm = () => typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
 
     function gmMirrorPut(store, value) {
         try {
-            if (hasGm() && value && value[STORE_KEYS[store]] !== undefined) GM_setValue(gmKey(store, value[STORE_KEYS[store]]), value);
+            if (!MIRROR_EXCLUDED_STORES.has(store) && hasGm() && value && value[STORE_KEYS[store]] !== undefined) GM_setValue(gmKey(store, value[STORE_KEYS[store]]), value);
         } catch (err) {
             console.warn('[MPE] Sicherung im Tampermonkey-Speicher fehlgeschlagen:', err);
         }
@@ -357,6 +540,172 @@
             }
         }
         return rows;
+    }
+
+    async function dbGetStrict(store, key) {
+        return (await idbRequest(store, 'readonly', (objectStore) => objectStore.get(key))) || null;
+    }
+
+    async function dbGetAllStrict(store) {
+        return (await idbRequest(store, 'readonly', (objectStore) => objectStore.getAll())) || [];
+    }
+
+    async function rememberContact(platform, adId, source) {
+        if (!/^\d+$/.test(adId)) throw new Error('Ungültige Anzeigen-ID');
+        const key = `${platform}:contact:${adId}`;
+        const existing = await dbGet('config', key);
+        if (existing) return existing;
+        const record = { key, platform, adId, source, contactedAt: new Date().toISOString() };
+        await dbPutMany([['config', record]]);
+        return record;
+    }
+
+    async function getContacts(platform) {
+        const contacts = (await dbGetAll('config')).filter((row) => row.key.startsWith(`${platform}:contact:`));
+        const ids = new Set(contacts.map((row) => row.adId));
+        for (const record of await dbGetAll('records')) {
+            const adId = String(record.extracted?.adId || '');
+            if (record.platform !== platform || !/^\d+$/.test(adId) || !record.extracted?.conversationId || isNa(record.extracted.conversationId) || ids.has(adId)) continue;
+            await rememberContact(platform, adId, 'saved-conversation');
+            ids.add(adId);
+        }
+        return [...ids];
+    }
+
+    function createUuid() {
+        if (global.crypto && typeof global.crypto.randomUUID === 'function') return global.crypto.randomUUID();
+        if (!global.crypto || typeof global.crypto.getRandomValues !== 'function') throw new Error('Kryptografischer Zufallsgenerator nicht verfügbar');
+        const bytes = new Uint8Array(16);
+        global.crypto.getRandomValues(bytes);
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+        return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    }
+
+    async function sha256Hex(data) {
+        if (!global.crypto || !global.crypto.subtle) throw new Error('SHA-256 ist in diesem Browser nicht verfügbar');
+        const bytes = data instanceof ArrayBuffer ? data : await data.arrayBuffer();
+        const digest = await global.crypto.subtle.digest('SHA-256', bytes);
+        return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    async function saveArticleData({ articleId = '', ebayItemId = '', data, files = [], unmappedFields = [] }) {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Artikeldaten sind ungültig');
+        const id = articleId || createUuid();
+        const current = await dbGetStrict('articles', id);
+        const mergedData = current ? await openConflictPreview(current.data || {}, data) : data;
+        if (!mergedData) return { cancelled: true };
+        const now = new Date().toISOString();
+        const localRevision = (current && current.localRevision || 0) + 1;
+        const article = {
+            ...(current || {}),
+            articleId: id,
+            data: mergedData,
+            ebayItemId: ebayItemId || (current && current.ebayItemId) || null,
+            mediaIds: [...new Set(current && current.mediaIds || [])],
+            localRevision,
+            remoteRevision: current && current.remoteRevision !== undefined ? current.remoteRevision : null,
+            updatedAt: now,
+            syncState: 'pending'
+        };
+        const entries = [['articles', article]];
+        entries.push(['syncOutbox', {
+            operationId: createUuid(),
+            entityType: 'article',
+            entityId: id,
+            localRevision,
+            baseRemoteRevision: article.remoteRevision,
+            payload: { articleId: id, ebayItemId: article.ebayItemId, data: mergedData, mediaIds: article.mediaIds },
+            state: 'pending',
+            attempts: 0,
+            createdAt: now
+        }]);
+        const savedMedia = await dbGetAllStrict('media');
+        const knownMediaHashes = new Set(savedMedia.filter((media) => media.articleId === id).map((media) => media.sha256));
+        let unsupportedMediaCount = 0;
+        for (const file of files) {
+            if (!file) continue;
+            if (!/^image\//i.test(file.type || '')) {
+                unsupportedMediaCount += 1;
+                continue;
+            }
+            const sha256 = await sha256Hex(file);
+            if (knownMediaHashes.has(sha256)) continue;
+            knownMediaHashes.add(sha256);
+            const mediaId = createUuid();
+            const media = {
+                mediaId,
+                articleId: id,
+                blob: file,
+                filename: file.name || 'bild',
+                mimeType: file.type || 'application/octet-stream',
+                sizeBytes: file.size,
+                sha256,
+                provider: null,
+                objectKey: null,
+                syncState: 'pending'
+            };
+            article.mediaIds.push(mediaId);
+            entries.push(['media', media]);
+            entries.push(['syncOutbox', {
+                operationId: createUuid(),
+                entityType: 'media',
+                entityId: mediaId,
+                localRevision: 1,
+                baseRemoteRevision: null,
+                payload: { mediaId, articleId: id, filename: media.filename, mimeType: media.mimeType, sizeBytes: media.sizeBytes, sha256 },
+                state: 'pending',
+                attempts: 0,
+                createdAt: now
+            }]);
+        }
+        article.mediaIds = [...new Set(article.mediaIds)];
+        entries[0][1] = article;
+        const articleOperation = entries.find(([store, value]) => store === 'syncOutbox' && value.entityType === 'article');
+        if (articleOperation) articleOperation[1].payload.mediaIds = article.mediaIds;
+        const savedUnknown = await dbGetAllStrict('unmappedFields');
+        for (const field of unmappedFields) {
+            const label = String(field.label || '').trim();
+            if (!label || savedUnknown.some((x) => x.articleId === id && x.label === label && JSON.stringify(x.value) === JSON.stringify(field.value) && x.status === 'open')) continue;
+            const record = {
+                id: createUuid(),
+                articleId: id,
+                label,
+                value: field.value,
+                source: String(field.source || ''),
+                capturedAt: now,
+                status: 'open'
+            };
+            entries.push(['unmappedFields', record]);
+            entries.push(['syncOutbox', {
+                operationId: createUuid(),
+                entityType: 'unmappedField',
+                entityId: record.id,
+                localRevision: 1,
+                baseRemoteRevision: null,
+                payload: record,
+                state: 'pending',
+                attempts: 0,
+                createdAt: now
+            }]);
+        }
+        await dbPutMany(entries);
+        return { article, mediaCount: entries.filter(([store]) => store === 'media').length, unmappedCount: entries.filter(([store]) => store === 'unmappedFields').length, unsupportedMediaCount };
+    }
+
+    async function dbPutMany(entries) {
+        const stores = [...new Set(entries.map(([store]) => store))];
+        const db = await openDb();
+        await new Promise((resolve, reject) => {
+            const tx = db.transaction(stores, 'readwrite');
+            for (const [store, value] of entries) tx.objectStore(store).put(value);
+            tx.oncomplete = () => resolve(true);
+            tx.onerror = () => reject(tx.error || new Error('IndexedDB-Transaktion fehlgeschlagen'));
+            tx.onabort = () => reject(tx.error || new Error('IndexedDB-Transaktion abgebrochen'));
+        });
+        for (const [store, value] of entries) gmMirrorPut(store, value);
+        return true;
     }
 
     /** Ein Wert gilt als bekannt, wenn er nicht leer und nicht „n/a“ ist (Listen: nicht leer). */
@@ -491,6 +840,8 @@
     ];
 
     const attributesToText = (attrs) => (Array.isArray(attrs) ? attrs.map((a) => `${a.name}: ${a.value}`).join('\n') : '');
+    const moneyFieldValue = (value) => String(value ?? '').replace(/\s*(?:EUR|€)\s*/gi, ' ').trim();
+    const MONEY_FIELDS = new Set(['listedPrice', 'listedShipping', 'price', 'shipping', 'buyerProtection']);
     const textToAttributes = (txt) => String(txt || '').split(/\r?\n/).map((l) => {
         const i = l.indexOf(':');
         return i > 0 ? { name: l.slice(0, i).trim(), value: l.slice(i + 1).trim() } : null;
@@ -509,10 +860,11 @@
             .${UI_PREFIX}-btn--ghost{background:#f3f4f6;color:#111827;border-color:#d1d5db}
             .${UI_PREFIX}-btn--icon{width:30px;height:30px;padding:0;justify-content:center;border-radius:50%}
             .${UI_PREFIX}-btn--attention{background:#f97316;border-color:#ea580c;color:#ffffff}
-            .${UI_PREFIX}-bar{display:inline-flex;align-items:center;gap:6px;margin-left:auto;margin-right:8px}
+            .${UI_PREFIX}-bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;max-width:100%;min-width:0;margin-left:auto;margin-right:8px}
+            .${UI_PREFIX}-bar .${UI_PREFIX}-btn,.${UI_PREFIX}-bar .${UI_PREFIX}-badge{flex-shrink:0}
             .${UI_PREFIX}-badge{font:600 11px system-ui,sans-serif;padding:3px 8px;border-radius:10px;background:#e5e7eb;color:#374151;border:1px solid #d1d5db;white-space:nowrap}
             .${UI_PREFIX}-badge--saved{background:#dcfce7;color:#166534;border-color:#86efac}
-            .${UI_PREFIX}-toasts{position:fixed;right:20px;bottom:20px;z-index:2147483647;display:flex;flex-direction:column;gap:8px;max-width:520px}
+            .${UI_PREFIX}-toasts{position:fixed;right:20px;bottom:20px;z-index:2147483645;display:flex;flex-direction:column;gap:8px;max-width:520px}
             .${UI_PREFIX}-toast{background:#1e293b;color:#fff;padding:12px 14px;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.3);font:13px/1.45 system-ui,-apple-system,Segoe UI,sans-serif;cursor:pointer;border-left:5px solid #38bdf8}
             .${UI_PREFIX}-toast--success{border-left-color:#22c55e}.${UI_PREFIX}-toast--warn{border-left-color:#f59e0b}.${UI_PREFIX}-toast--error{border-left-color:#ef4444}
             .${UI_PREFIX}-toast ul{margin:6px 0 0 18px;padding:0}.${UI_PREFIX}-toast small{display:block;margin-top:6px;color:#94a3b8}
@@ -528,6 +880,7 @@
             .${UI_PREFIX}-field--wide{grid-column:1/-1}
             .${UI_PREFIX}-field input,.${UI_PREFIX}-field select,.${UI_PREFIX}-field textarea{font:12.5px system-ui,sans-serif;padding:5px 6px;border:1px solid #d1d5db;border-radius:5px;background:#fff;color:#111827}
             .${UI_PREFIX}-field--changed input,.${UI_PREFIX}-field--changed select,.${UI_PREFIX}-field--changed textarea{border-color:#f59e0b;background:#fffbeb}
+            .${UI_PREFIX}-modal select{appearance:auto!important;background-image:none!important;background-repeat:no-repeat!important;padding-right:24px}
             .${UI_PREFIX}-field--missing input{border-color:#ef4444}
             .${UI_PREFIX}-check{display:flex;align-items:center;gap:6px;font-size:12.5px;grid-column:1/-1}
             .${UI_PREFIX}-buttons{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center}
@@ -1020,6 +1373,7 @@
         { key: 'acquiredAt', label: 'Erworben am (TT.MM.JJJJ)' },
         { key: 'acquiredFrom', label: 'Erworben von', type: 'select', options: [['', '–'], ['Privatkauf', 'Privatkauf'], ['Gewerblicher Kauf', 'Gewerblicher Kauf']] },
         { key: 'acquisitionPrice', label: 'Anschaffungspreis (EUR)' },
+        { key: 'originalInvoiceNumber', label: 'Originale Rechnungsnummer (Erwerb)' },
         { key: 'saleReason', label: 'Verkaufsgrund', wide: true }
     ];
 
@@ -1036,6 +1390,7 @@
             acquiredAt: dateDe(acq.date),
             acquiredFrom: acq.from || '',
             acquisitionPrice: eurInput(acq.priceCents),
+            originalInvoiceNumber: acq.originalInvoiceNumber || '',
             saleReason: acq.reason || ''
         };
     }
@@ -1058,6 +1413,7 @@
                 date: toIsoDate(values.acquiredAt) || '',
                 from: values.acquiredFrom || '',
                 priceCents: toCents(values.acquisitionPrice, true),
+                originalInvoiceNumber: values.originalInvoiceNumber ?? order.acquisition?.originalInvoiceNumber ?? '',
                 reason: values.saleReason || ''
             };
         }
@@ -1369,6 +1725,7 @@
 
     /** Popup: Beträge und Erwerbsangaben einer Bestellung korrigieren (Overrides) inkl. Auswahl des Versandtarifs. */
     async function openOrderEditor(order, reason = '') {
+        const purchase = order.role === 'BUYER';
         const carriers = await getShippingRates();
         const auto = orderEditValues({ ...order, overrides: {} });
         const cur = orderEditValues(order);
@@ -1380,14 +1737,14 @@
                 if (pa) options.push([JSON.stringify({ carrier: c, product: p.product, cents: pa.cents, validFrom: pa.validFrom }), `${c} – ${p.product} – ${eur(pa.cents)}`]);
             }
         }
-        const fields = AMOUNT_FIELDS.map(([key, label]) => ({ key, label, value: cur[key], original: auto[key] }));
-        fields.push({ key: 'shippingProduct', label: `Versandtarif zum ${dateDe(date)} (setzt „Versandkosten“)`, type: 'select', options, value: '', wide: true });
+        const fields = (purchase ? PURCHASE_FIELDS : AMOUNT_FIELDS).map(([key, label]) => ({ key, label, value: cur[key], original: auto[key] }));
+        if (!purchase) fields.push({ key: 'shippingProduct', label: `Versandtarif zum ${dateDe(date)} (setzt „Versandkosten“)`, type: 'select', options, value: '', wide: true });
         const answer = await openForm({
             title: `✏️ Bestellung ${order.orderId} – Beträge & Erwerb`,
             hint: [reason, `Versandservice laut Bestellung: ${order.shippingService || 'n/a'}. Beträge in EUR, orange = manuell geändert.`].filter(Boolean).join(' · '),
             sections: [
                 { title: 'Beträge (werden in der Datenbank gespeichert)', fields },
-                { title: 'Erwerb (Verkaufsbericht: Haltedauer, Anschaffungspreis, Ertrag)', fields: ACQUISITION_FIELDS.map((f) => ({ ...f, value: cur[f.key] })) }
+                ...(!purchase ? [{ title: 'Erwerb (Verkaufsbericht: Haltedauer, Anschaffungspreis, Ertrag)', fields: ACQUISITION_FIELDS.map((f) => ({ ...f, value: cur[f.key] })) }] : [])
             ],
             buttons: [{ label: 'Abbrechen', value: null }, { label: 'Manuelle Beträge löschen', value: 'reset' }, { label: 'Speichern', value: 'save', primary: true }]
         });
@@ -1417,7 +1774,8 @@
     }
 
     function buildOrderDocumentModel(order, ctx) {
-        const a = computeOrderAmounts(order);
+        const purchase = order.role === 'BUYER';
+        const a = purchase ? computePurchaseAmounts(order) : computeOrderAmounts(order);
         const sa = order.shippingActual;
         const s = ctx.settings;
         const carrier = detectCarrier(order.trackingId, order.shippingService);
@@ -1426,9 +1784,14 @@
             brand: ctx.brand,
             scriptLabel: ctx.scriptLabel,
             exportedAt: Theme.formatExportTimestamp(new Date()),
-            note: s.privateSaleNote || '',
-            seller: { name: s.ownFullName, lines: String(s.ownAddress || '').split(/\r?\n/).filter(Boolean), username: s.ownUsername || '' },
-            buyer: { lines: order.address && order.address.length ? order.address : [order.buyer && order.buyer.name, order.buyer && order.buyer.username ? `(${order.buyer.username})` : ''] },
+            purchase,
+            note: purchase ? 'Selbst erstellter Kaufbeleg für die eigenen Unterlagen. Ersetzt keine Originalrechnung des Verkäufers.' : s.privateSaleNote || '',
+            seller: purchase
+                ? { name: order.seller?.name || 'n/a', lines: order.seller?.address || [], username: order.seller?.username || '' }
+                : { name: s.ownFullName, lines: String(s.ownAddress || '').split(/\r?\n/).filter(Boolean), username: s.ownUsername || '' },
+            buyer: purchase
+                ? { lines: [s.ownFullName || 'n/a', ...String(s.ownAddress || '').split(/\r?\n/).filter(Boolean)] }
+                : { lines: order.address && order.address.length ? order.address : [order.buyer && order.buyer.name, order.buyer && order.buyer.username ? `(${order.buyer.username})` : ''] },
             order: {
                 orderId: order.orderId,
                 orderUrl: order.orderUrl,
@@ -1486,6 +1849,106 @@
         a.click();
         a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 10 * 60 * 1000);
+    }
+
+    async function blobToBase64(blob) {
+        return (await blobToDataUrl(blob)).split(',')[1] || '';
+    }
+
+    function base64ToBlob(base64, mimeType) {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return new Blob([bytes], { type: mimeType || 'application/octet-stream' });
+    }
+
+    function isSecretKey(key) {
+        const normalized = String(key).replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+        return /(?:^|_)(?:token|password|secret|credential|private_key|access_key|api_key|auth_key|authorization|deepl_key|deep_lkey|deepl_auth_key)$/.test(normalized);
+    }
+
+    function stripSecrets(value) {
+        if (Array.isArray(value)) return value.map(stripSecrets);
+        if (!value || typeof value !== 'object') return value;
+        return Object.fromEntries(Object.entries(value).filter(([key]) => !isSecretKey(key)).map(([key, child]) => [key, stripSecrets(child)]));
+    }
+
+    function containsSecretKey(value) {
+        if (Array.isArray(value)) return value.some(containsSecretKey);
+        if (!value || typeof value !== 'object') return false;
+        return Object.entries(value).some(([key, child]) => isSecretKey(key) || containsSecretKey(child));
+    }
+
+    const BACKUP_STORES = ['records', 'orders', 'config', 'articles', 'media', 'syncOutbox', 'unmappedFields'];
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+    async function validateBackup(backup) {
+        if (!backup || backup.format !== 'marketplace-pdf-export-backup' || backup.version !== 1 || !backup.stores || typeof backup.stores !== 'object') {
+            throw new Error('Sicherungsformat oder Version wird nicht unterstützt');
+        }
+        const assertSafeKeys = (value) => {
+            if (Array.isArray(value)) {
+                value.forEach(assertSafeKeys);
+            } else if (value && typeof value === 'object') {
+                for (const [key, child] of Object.entries(value)) {
+                    if (key === '__proto__' || key === 'prototype' || key === 'constructor') throw new Error(`Sicherungsdatei enthält einen unsicheren Feldnamen: ${key}`);
+                    assertSafeKeys(child);
+                }
+            }
+        };
+        assertSafeKeys(backup);
+        if (containsSecretKey(backup)) throw new Error('Sicherung enthält ein verbotenes Geheimnisfeld; es wurden keine Daten geändert');
+        if (backup.settings !== undefined && (!backup.settings || typeof backup.settings !== 'object' || Array.isArray(backup.settings))) {
+            throw new Error('Sicherung enthält ungültige Einstellungen');
+        }
+        for (const name of BACKUP_STORES) {
+            if (!Array.isArray(backup.stores[name])) throw new Error(`Sicherung enthält keine gültige Liste für ${name}`);
+        }
+        const stores = { ...backup.stores };
+        const articleIds = new Set();
+        for (const article of stores.articles) {
+            if (!article || !UUID_RE.test(article.articleId || '') || !article.data || typeof article.data !== 'object' || Array.isArray(article.data)
+                || !Number.isInteger(article.localRevision) || article.localRevision < 1 || !Array.isArray(article.mediaIds)) {
+                throw new Error('Sicherung enthält einen ungültigen Artikel');
+            }
+            articleIds.add(article.articleId);
+        }
+        const restoredMedia = [];
+        for (const media of stores.media) {
+            if (!media || typeof media.blobBase64 !== 'string' || !UUID_RE.test(media.mediaId || '') || !UUID_RE.test(media.articleId || '')
+                || !articleIds.has(media.articleId) || !Number.isInteger(media.sizeBytes) || media.sizeBytes < 0
+                || typeof media.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(media.sha256)
+                || typeof media.filename !== 'string' || typeof media.mimeType !== 'string') {
+                throw new Error('Sicherung enthält einen ungültigen Medieneintrag');
+            }
+            if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(media.blobBase64)) throw new Error(`Base64-Daten von ${media.filename} sind ungültig`);
+            const blob = base64ToBlob(media.blobBase64, media.mimeType);
+            if (blob.size !== media.sizeBytes || await sha256Hex(blob) !== media.sha256) throw new Error(`Prüfsumme oder Byte-Größe von ${media.filename} stimmt nicht`);
+            const metadata = { ...media };
+            delete metadata.blobBase64;
+            restoredMedia.push({ ...metadata, blob });
+        }
+        stores.media = restoredMedia;
+        const keyFields = { records: 'key', orders: 'orderId', config: 'key', articles: 'articleId', media: 'mediaId', syncOutbox: 'operationId', unmappedFields: 'id' };
+        for (const name of BACKUP_STORES) {
+            const seen = new Set();
+            for (const row of stores[name]) {
+                const key = row && row[keyFields[name]];
+                if (key === undefined || key === null || key === '' || seen.has(String(key))) throw new Error(`Sicherung enthält einen fehlenden oder doppelten Schlüssel in ${name}`);
+                seen.add(String(key));
+                if (['articles', 'media', 'syncOutbox', 'unmappedFields'].includes(name) && !UUID_RE.test(key)) throw new Error(`Sicherung enthält eine ungültige UUID in ${name}`);
+            }
+        }
+        const mediaIds = new Set(stores.media.map((media) => media.mediaId));
+        for (const article of stores.articles) {
+            if (article.mediaIds.some((id) => !UUID_RE.test(id) || !mediaIds.has(id))) throw new Error(`Sicherung enthält eine ungültige Medienzuordnung für Artikel ${article.articleId}`);
+        }
+        for (const field of stores.unmappedFields) {
+            if (!field || typeof field.label !== 'string' || (field.articleId !== null && field.articleId !== undefined && !articleIds.has(field.articleId))) {
+                throw new Error('Sicherung enthält ein ungültiges nicht zugeordnetes Feld');
+            }
+        }
+        return stores;
     }
 
     /* ==========================================================================
@@ -1573,7 +2036,10 @@
                 sections.push({
                     title: '📄 Diese Konversation / Anzeige (wird in der lokalen Datenbank gespeichert)',
                     hint: 'Orange = manuell geändert (gilt auch für künftige Exporte). Rot = fehlt (n/a).',
-                    fields: localFieldDefs.map((f) => ({ ...f, value: current[f.key] === undefined ? '' : current[f.key], original: extractedVals[f.key] === undefined ? '' : extractedVals[f.key], missing: /^n\/?a$/i.test(String(current[f.key] === undefined || current[f.key] === null ? '' : current[f.key]).trim()) }))
+                    fields: localFieldDefs.map((f) => {
+                        const display = (value) => config.platform === 'kleinanzeigen' && MONEY_FIELDS.has(f.key) ? moneyFieldValue(value) : value ?? '';
+                        return { ...f, value: display(current[f.key]), original: display(extractedVals[f.key]), missing: isNa(current[f.key]) };
+                    })
                 });
             } else {
                 sections.push({ title: '📄 Diese Konversation', hint: 'Noch keine Daten für diese Konversation. Nutze „📝 Prüfen“, um die Felder vor dem Export zu sehen und zu ändern.', fields: [] });
@@ -1595,7 +2061,8 @@
                 const extractedVals = { ...extraction.meta, attributesText: attributesToText(extraction.attributes), description: extraction.description || '' };
                 for (const f of localFieldDefs) {
                     const v = answer.values[f.key];
-                    const orig = extractedVals[f.key] === undefined || extractedVals[f.key] === null ? '' : String(extractedVals[f.key]);
+                    const orig = config.platform === 'kleinanzeigen' && MONEY_FIELDS.has(f.key)
+                        ? moneyFieldValue(extractedVals[f.key]) : String(extractedVals[f.key] ?? '');
                     if (v !== undefined && v !== orig) overrides[f.key] = v;
                 }
             }
@@ -1619,13 +2086,15 @@
             });
         }
 
-        async function run({ review = false } = {}) {
+        async function run({ review = false, articleOnly = false } = {}) {
             if (busy) return;
             busy = true;
             const progress = toast(`⏳ ${config.platformLabel}: lese Nachrichtenverlauf, Anzeige & Bilder …`, { sticky: true, id: `${UI_PREFIX}-progress` });
             try {
                 const settings = store.get();
-                const extraction = await config.adapter.collect({ settings, core: api, toast });
+                const collect = articleOnly ? config.adapter.collectArticle : config.adapter.collect;
+                if (typeof collect !== 'function') throw new Error('Artikeldetails-Export ist auf dieser Seite nicht verfügbar');
+                const extraction = await collect({ settings, core: api, toast });
                 const warnings = [...(extraction.warnings || [])];
                 let record = await dbGet('records', extraction.key);
 
@@ -1667,6 +2136,7 @@
                     includeAdPage: extraction.includeAdPage !== false,
                     labels: config.labels
                 };
+                model.articleOnly = articleOnly;
 
                 await Theme.prepareFonts();
                 let bytes = await renderPdfBytes(Theme.buildExportDocument(model));
@@ -1679,10 +2149,10 @@
                 }
 
                 const txIso = toIsoDate(merged.meta.transactionDate);
-                const datePart = txIso || formatDateIso();
+                const datePart = articleOnly ? formatDateIso() : txIso || formatDateIso();
                 const titlePart = sanitizeFilename(merged.meta.adTitle || 'Unbekannt', 90);
                 const idPart = isNa(merged.meta.adId) ? '' : ` ${sanitizeFilename(merged.meta.adId, 24)}`;
-                const filename = `${datePart} ${sanitizeFilename(config.platformLabel.replace(/\.de$/i, ''))} Chat ${titlePart}${idPart}.pdf`;
+                const filename = `${datePart} ${sanitizeFilename(config.platformLabel.replace(/\.de$/i, ''))} ${articleOnly ? 'Artikeldetails' : 'Chat'} ${titlePart}${idPart}.pdf`;
                 const url = deliverPdf(bytes, filename, settings.deliveryMode);
 
                 await dbPut('records', {
@@ -1700,7 +2170,7 @@
 
                 progress.close();
                 document.getElementById(`${UI_PREFIX}-progress`)?.remove();
-                if (!txIso) warnings.push('Transaktionsdatum unbekannt – Dateiname nutzt das heutige Datum');
+                if (!txIso && !articleOnly) warnings.push('Transaktionsdatum unbekannt – Dateiname nutzt das heutige Datum');
                 const missing = missingFieldLabels(merged.meta);
                 if (missing.length) warnings.push(`Fehlende Felder (n/a): ${missing.join(', ')}`);
                 toast(`✅ PDF erstellt: ${filename}`, {
@@ -1739,6 +2209,335 @@
             await openEditor({ extraction, record, mode: 'save' });
         }
 
+        async function saveCurrentArticle() {
+            if (typeof config.adapter.captureArticle !== 'function') throw new Error('Artikelerfassung ist für diese Seite nicht verfügbar');
+            const captured = await config.adapter.captureArticle();
+            if (!captured) throw new Error('Kein Angebotsformular gefunden');
+            const draftKey = `mpe:article-draft:${hashText(`${location.pathname}${location.search}`)}`;
+            let articleId = captured.articleId || (document.documentElement.dataset.mpeArticleId || '');
+            if (!articleId && typeof GM_getValue === 'function') articleId = GM_getValue(draftKey, '');
+            if (!articleId && captured.ebayItemId) {
+                const match = (await dbGetAllStrict('articles')).filter((item) => item.ebayItemId === captured.ebayItemId);
+                if (match.length > 1) throw new Error(`Mehrere gespeicherte Artikel passen zur eBay-Artikelnummer ${captured.ebayItemId}; es wurde nichts verändert`);
+                if (match.length === 1) articleId = match[0].articleId;
+            }
+            const result = await saveArticleData({ ...captured, articleId });
+            if (result.cancelled) return result;
+            document.documentElement.dataset.mpeArticleId = result.article.articleId;
+            if (typeof GM_setValue === 'function') GM_setValue(draftKey, result.article.articleId);
+            const message = `Artikel lokal gespeichert (${result.mediaCount} neue Bilddatei(en)); Synchronisierung ausstehend.`;
+            toast(result.unsupportedMediaCount
+                ? `${message} ${result.unsupportedMediaCount} nicht unterstützte Datei(en) wurden nicht übernommen.`
+                : message, { type: result.unsupportedMediaCount ? 'warn' : 'success', timeoutMs: 6000 });
+            return result;
+        }
+
+        async function openUnmappedFields() {
+            const rows = (await dbGetAllStrict('unmappedFields')).filter((x) => x.status === 'open');
+            const overlay = document.createElement('div');
+            overlay.className = `${UI_PREFIX}-overlay`;
+            const modal = document.createElement('div');
+            modal.className = `${UI_PREFIX}-modal ${UI_PREFIX}-modal--wide`;
+            const title = document.createElement('h3');
+            title.textContent = 'Diese Daten konnten nicht zugeordnet werden';
+            const hint = document.createElement('p');
+            hint.className = `${UI_PREFIX}-hint`;
+            hint.textContent = rows.length ? 'Kopiere benötigte Werte oder markiere einzelne Einträge als erledigt.' : 'Keine offenen Felder.';
+            const table = document.createElement('table');
+            table.className = `${UI_PREFIX}-rates-table`;
+            const head = document.createElement('tr');
+            for (const text of ['Feld', 'Wert', 'Quelle', 'Aktion']) {
+                const th = document.createElement('th');
+                th.textContent = text;
+                head.appendChild(th);
+            }
+            table.appendChild(head);
+            for (const rowData of rows) {
+                const tr = document.createElement('tr');
+                for (const value of [rowData.label, typeof rowData.value === 'string' ? rowData.value : JSON.stringify(rowData.value), rowData.source]) {
+                    const td = document.createElement('td');
+                    td.textContent = value || '';
+                    tr.appendChild(td);
+                }
+                const actions = document.createElement('td');
+                const copy = document.createElement('button');
+                copy.type = 'button';
+                copy.className = `${UI_PREFIX}-btn ${UI_PREFIX}-btn--ghost`;
+                copy.textContent = 'Kopieren';
+                copy.addEventListener('click', async () => {
+                    try {
+                        await navigator.clipboard.writeText(String(rowData.value));
+                        toast('Wert in die Zwischenablage kopiert.', { type: 'success', timeoutMs: 2500 });
+                    } catch (err) {
+                        toast(`Kopieren fehlgeschlagen: ${err.message || err}`, { type: 'error', sticky: true });
+                    }
+                });
+                const done = document.createElement('button');
+                done.type = 'button';
+                done.className = `${UI_PREFIX}-btn ${UI_PREFIX}-btn--ghost`;
+                done.textContent = 'Erledigt';
+                done.addEventListener('click', async () => {
+                    try {
+                        await dbPutMany([['unmappedFields', { ...rowData, status: 'resolved' }]]);
+                        tr.remove();
+                        toast('Eintrag als erledigt markiert.', { type: 'success', timeoutMs: 2500 });
+                    } catch (err) {
+                        toast(`Eintrag konnte nicht gespeichert werden: ${err.message || err}`, { type: 'error', sticky: true });
+                    }
+                });
+                actions.append(copy, done);
+                tr.appendChild(actions);
+                table.appendChild(tr);
+            }
+            const closeButton = document.createElement('button');
+            closeButton.type = 'button';
+            closeButton.className = `${UI_PREFIX}-btn`;
+            closeButton.textContent = 'Schließen';
+            const close = () => overlay.remove();
+            closeButton.addEventListener('click', close);
+            const buttons = document.createElement('div');
+            buttons.className = `${UI_PREFIX}-buttons`;
+            buttons.appendChild(closeButton);
+            modal.append(title, hint, table, buttons);
+            overlay.appendChild(modal);
+            overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
+            document.body.appendChild(overlay);
+        }
+
+        async function exportBackup() {
+            const storeNames = ['records', 'orders', 'config', 'articles', 'media', 'syncOutbox', 'unmappedFields'];
+            const stores = {};
+            for (const name of storeNames) {
+                stores[name] = await dbGetAllStrict(name);
+                if (name !== 'media' && hasGm() && typeof GM_listValues === 'function') {
+                    const prefix = `mpe:${name}:`;
+                    const known = new Set(stores[name].map((row) => String(row[STORE_KEYS[name]])));
+                    for (const key of GM_listValues()) {
+                        if (!key.startsWith(prefix) || known.has(key.slice(prefix.length))) continue;
+                        const mirrored = gmMirrorGet(name, key.slice(prefix.length));
+                        if (mirrored) stores[name].push(mirrored);
+                    }
+                }
+            }
+            const exportedMedia = [];
+            for (const media of stores.media) {
+                const { blob, ...metadata } = media;
+                if (!blob || typeof blob.size !== 'number' || typeof blob.arrayBuffer !== 'function') throw new Error(`Originaldatei ${media.filename} fehlt oder ist ungültig`);
+                exportedMedia.push({ ...metadata, blobBase64: await blobToBase64(blob) });
+            }
+            stores.media = exportedMedia;
+            const backup = {
+                format: 'marketplace-pdf-export-backup',
+                version: 1,
+                exportedAt: new Date().toISOString(),
+                settings: stripSecrets(store.get()),
+                stores: stripSecrets(stores)
+            };
+            const filename = `marketplace-export-backup-${new Date().toISOString().slice(0, 10)}.json`;
+            deliverFile(new Blob([JSON.stringify(backup)], { type: 'application/json' }), filename, 'application/json');
+            toast('Sicherung erstellt; Zugangsdaten und API-Token wurden ausgelassen.', { type: 'success', timeoutMs: 5000 });
+        }
+
+        async function importBackup(file) {
+            let backup;
+            try {
+                backup = JSON.parse(await file.text());
+            } catch (err) {
+                throw new Error(`Sicherungsdatei ist kein gültiges JSON: ${err.message || err}`);
+            }
+            const storeNames = BACKUP_STORES;
+            const incomingStores = await validateBackup(backup);
+            const keyFields = { records: 'key', orders: 'orderId', config: 'key', articles: 'articleId', media: 'mediaId', syncOutbox: 'operationId', unmappedFields: 'id' };
+            const staged = [];
+            const supersededSyncEntities = new Set();
+            const existingOutbox = await dbGetAllStrict('syncOutbox');
+            for (const name of storeNames) {
+                for (const incoming of incomingStores[name]) {
+                    const key = incoming[keyFields[name]];
+                    if (name === 'syncOutbox' && supersededSyncEntities.has(`${incoming.entityType}:${incoming.entityId}`)) continue;
+                    const existing = await dbGetStrict(name, key);
+                    if (!existing) {
+                        staged.push([name, incoming]);
+                        continue;
+                    }
+                    if (name === 'syncOutbox') {
+                        if (JSON.stringify(existing) !== JSON.stringify(incoming)) throw new Error(`Operationskennung ${key} ist mit unterschiedlichen Daten vorhanden`);
+                        continue;
+                    }
+                    if (name === 'media') {
+                        if (existing.articleId !== incoming.articleId) throw new Error(`Medienkennung ${key} ist bereits einem anderen Artikel zugeordnet`);
+                        if (existing.sha256 === incoming.sha256 && existing.filename === incoming.filename && existing.mimeType === incoming.mimeType && existing.sizeBytes === incoming.sizeBytes) continue;
+                        const choice = await openMediaConflict(existing, incoming);
+                        if (!choice) return false;
+                        if (choice === 'new') {
+                            const media = { ...incoming, syncState: 'pending' };
+                            supersededSyncEntities.add(`media:${media.mediaId}`);
+                            staged.push([name, media]);
+                            staged.push(['syncOutbox', {
+                                operationId: createUuid(),
+                                entityType: 'media',
+                                entityId: media.mediaId,
+                                localRevision: 1,
+                                baseRemoteRevision: null,
+                                payload: { mediaId: media.mediaId, articleId: media.articleId, filename: media.filename, mimeType: media.mimeType, sizeBytes: media.sizeBytes, sha256: media.sha256 },
+                                state: 'pending',
+                                attempts: 0,
+                                createdAt: new Date().toISOString()
+                            }]);
+                        }
+                        continue;
+                    }
+                    if (JSON.stringify(existing) === JSON.stringify(incoming)) continue;
+                    let merged;
+                    if (name === 'articles') {
+                        const data = await openConflictPreview(existing.data || {}, incoming.data || {});
+                        if (!data) return false;
+                        supersededSyncEntities.add(`article:${existing.articleId}`);
+                        merged = {
+                            ...existing,
+                            ...incoming,
+                            data,
+                            mediaIds: [...new Set([...(existing.mediaIds || []), ...(incoming.mediaIds || [])])],
+                            localRevision: Math.max(existing.localRevision || 0, incoming.localRevision || 0) + 1,
+                            remoteRevision: existing.remoteRevision === undefined ? null : existing.remoteRevision,
+                            syncState: 'pending'
+                        };
+                        staged.push(['syncOutbox', {
+                            operationId: createUuid(),
+                            entityType: 'article',
+                            entityId: merged.articleId,
+                            localRevision: merged.localRevision,
+                            baseRemoteRevision: merged.remoteRevision,
+                            payload: { articleId: merged.articleId, ebayItemId: merged.ebayItemId, data: merged.data, mediaIds: merged.mediaIds },
+                            state: 'pending',
+                            attempts: 0,
+                            createdAt: new Date().toISOString()
+                        }]);
+                    } else {
+                        merged = await openConflictPreview(existing, incoming);
+                        if (!merged) return false;
+                    }
+                    staged.push([name, merged]);
+                }
+            }
+            for (const operation of existingOutbox) {
+                if (['pending', 'error'].includes(operation.state) && supersededSyncEntities.has(`${operation.entityType}:${operation.entityId}`)) {
+                    staged.push(['syncOutbox', { ...operation, state: 'superseded' }]);
+                }
+            }
+            const oldSettings = store.get();
+            const importedSettings = stripSecrets(backup.settings || {});
+            const nextSettings = { ...oldSettings, ...importedSettings };
+            if (!await confirmBackupImport(staged.length)) return false;
+            store.set(nextSettings);
+            try {
+                if (staged.length) await dbPutMany(staged);
+            } catch (err) {
+                try {
+                    store.set(oldSettings);
+                } catch (rollbackError) {
+                    throw new Error(`Import fehlgeschlagen und Einstellungen konnten nicht zurückgesetzt werden: ${rollbackError.message || rollbackError}`);
+                }
+                throw err;
+            }
+            toast(`Sicherung importiert (${staged.length} Datensätze); Zugangsdaten und API-Token blieben lokal.`, { type: 'success', sticky: true });
+            return true;
+        }
+
+        function confirmBackupImport(recordCount) {
+            return new Promise((resolve) => {
+                const overlay = document.createElement('div');
+                overlay.className = `${UI_PREFIX}-overlay`;
+                const modal = document.createElement('div');
+                modal.className = `${UI_PREFIX}-modal`;
+                const title = document.createElement('h3');
+                title.textContent = 'Sicherung übernehmen?';
+                const hint = document.createElement('p');
+                hint.className = `${UI_PREFIX}-hint`;
+                hint.textContent = `${recordCount} neue oder geänderte Datensätze und die nicht geheimen Einstellungen werden lokal gespeichert. Zugangsdaten und API-Token bleiben unverändert.`;
+                const buttons = document.createElement('div');
+                buttons.className = `${UI_PREFIX}-buttons`;
+                const close = (value) => { overlay.remove(); resolve(value); };
+                const cancel = document.createElement('button');
+                cancel.type = 'button';
+                cancel.className = `${UI_PREFIX}-btn ${UI_PREFIX}-btn--ghost`;
+                cancel.textContent = 'Abbrechen';
+                cancel.addEventListener('click', () => close(false));
+                const apply = document.createElement('button');
+                apply.type = 'button';
+                apply.className = `${UI_PREFIX}-btn`;
+                apply.textContent = 'Übernehmen';
+                apply.addEventListener('click', () => close(true));
+                buttons.append(cancel, apply);
+                modal.append(title, hint, buttons);
+                overlay.appendChild(modal);
+                overlay.addEventListener('click', (event) => { if (event.target === overlay) close(false); });
+                document.body.appendChild(overlay);
+            });
+        }
+
+        function openBackupDialog() {
+            const overlay = document.createElement('div');
+            overlay.className = `${UI_PREFIX}-overlay`;
+            const modal = document.createElement('div');
+            modal.className = `${UI_PREFIX}-modal`;
+            const title = document.createElement('h3');
+            title.textContent = 'Sicherung';
+            const hint = document.createElement('p');
+            hint.className = `${UI_PREFIX}-hint`;
+            hint.textContent = 'Export enthält Artikeldaten, Originalbilder, Bestellungen und Einstellungen. Zugangsdaten und API-Token werden ausgelassen.';
+            const buttons = document.createElement('div');
+            buttons.className = `${UI_PREFIX}-buttons`;
+            const close = () => overlay.remove();
+            const exportButton = document.createElement('button');
+            exportButton.type = 'button';
+            exportButton.className = `${UI_PREFIX}-btn`;
+            exportButton.textContent = 'Sicherung exportieren';
+            exportButton.addEventListener('click', async () => {
+                exportButton.disabled = true;
+                try {
+                    await exportBackup();
+                    close();
+                } catch (err) {
+                    toast(`Sicherung fehlgeschlagen: ${err.message || err}`, { type: 'error', sticky: true });
+                } finally {
+                    exportButton.disabled = false;
+                }
+            });
+            const importButton = document.createElement('button');
+            importButton.type = 'button';
+            importButton.className = `${UI_PREFIX}-btn ${UI_PREFIX}-btn--ghost`;
+            importButton.textContent = 'Sicherung importieren';
+            const fileInput = document.createElement('input');
+            fileInput.type = 'file';
+            fileInput.accept = 'application/json,.json';
+            fileInput.hidden = true;
+            importButton.addEventListener('click', () => fileInput.click());
+            fileInput.addEventListener('change', async () => {
+                const file = fileInput.files && fileInput.files[0];
+                if (!file) return;
+                importButton.disabled = true;
+                try {
+                    if (await importBackup(file)) close();
+                } catch (err) {
+                    toast(`Sicherung konnte nicht importiert werden: ${err.message || err}`, { type: 'error', sticky: true });
+                } finally {
+                    importButton.disabled = false;
+                    fileInput.value = '';
+                }
+            });
+            const cancel = document.createElement('button');
+            cancel.type = 'button';
+            cancel.className = `${UI_PREFIX}-btn ${UI_PREFIX}-btn--ghost`;
+            cancel.textContent = 'Schließen';
+            cancel.addEventListener('click', close);
+            buttons.append(exportButton, importButton, cancel);
+            modal.append(title, hint, fileInput, buttons);
+            overlay.appendChild(modal);
+            overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
+            document.body.appendChild(overlay);
+        }
+
         const brand = config.brand || config.platformLabel.replace(/\.de$/i, '');
         const docCtx = () => ({ platform: config.platform, brand, scriptLabel, settings: store.get(), itemUrl: config.itemUrl, paymentMethod: config.paymentMethod });
 
@@ -1763,7 +2562,7 @@
             try {
                 let order = await loadOrder(orderId);
                 if (!order) return;
-                order = await ensureShippingActual(order);
+                if (order.role !== 'BUYER') order = await ensureShippingActual(order);
                 if (!order) return;
                 const model = buildOrderDocumentModel(order, docCtx());
                 const images = await Promise.all(model.items.map((i) => (i.imageUrl ? fetchImage(i.imageUrl, 'artikel.jpg') : null)));
@@ -1771,13 +2570,14 @@
                 const bytes = await renderPdfBytes(Theme.buildInvoiceDocument(model));
                 const title = sanitizeFilename((order.items && order.items[0] && order.items[0].title) || '', 70);
                 // Rechnungsdatum = Zahldatum (wie im Dokument)
-                const filename = `${order.paidDate || order.soldDate || formatDateIso()} ${sanitizeFilename(brand)} Rechnung ${order.orderId} ${title}.pdf`;
+                const documentLabel = model.purchase ? 'Kaufbeleg' : 'Rechnung';
+                const filename = `${order.paidDate || order.soldDate || formatDateIso()} ${sanitizeFilename(brand)} ${documentLabel} ${order.orderId} ${title}.pdf`;
                 const url = deliverPdf(bytes, filename, store.get().deliveryMode);
                 await dbPut('orders', { ...order, invoiceCreatedAt: new Date().toISOString(), invoiceAmounts: model.amounts });
-                toast(`🧾 Rechnung erstellt: ${filename}`, {
+                toast(`🧾 ${documentLabel} erstellt: ${filename}`, {
                     type: 'success',
                     sticky: true,
-                    list: [`Gesamtbetrag (Erlös): ${eur(model.amounts.total)}`, `Versandkosten: ${eur(model.amounts.shippingActual)}${model.shippingActualLabel ? ` (${model.shippingActualLabel})` : ''}`],
+                    list: model.purchase ? [`Gesamtbetrag: ${eur(model.amounts.total)}`] : [`Gesamtbetrag (Erlös): ${eur(model.amounts.total)}`, `Versandkosten: ${eur(model.amounts.shippingActual)}${model.shippingActualLabel ? ` (${model.shippingActualLabel})` : ''}`],
                     actions: [
                         { label: '📂 Im Tab öffnen', href: url },
                         { label: '✏️ Werte ändern & neu erstellen', onClick: async () => { if (await openOrderEditor(order)) await createInvoice(order.orderId); } }
@@ -2011,6 +2811,9 @@
                     b.disabled = true;
                     try {
                         await onClick();
+                    } catch (err) {
+                        console.error(`[${config.scriptName}]`, err);
+                        toast(`Aktion fehlgeschlagen: ${err.message || err}`, { type: 'error', sticky: true });
                     } finally {
                         b.disabled = false;
                     }
@@ -2020,14 +2823,60 @@
             const orderId = () => (getOrderId ? getOrderId() : config.adapter.getOrderId ? config.adapter.getOrderId() : '');
             const ghost = `${UI_PREFIX}-btn--ghost`;
             const icon = `${ghost} ${UI_PREFIX}-btn--icon`;
-            if (mode === 'order') {
+            const backupButton = () => mk('🗄️', 'Sicherung exportieren oder importieren', icon, () => openBackupDialog());
+            if (mode === 'details') {
                 bar.append(
-                    mk('🧾 Rechnung', 'Rechnung mit allen Gebühren und tatsächlichen Versandkosten erstellen', '', () => createInvoice(orderId())),
-                    mk('✏️ Beträge', 'Preis, Versand, Erstattung, Gebühren und Erwerbsangaben dieser Bestellung korrigieren', ghost, () => editOrder(orderId())),
-                    mk('🚚', 'Versandkosten-Tabelle (gültig ab …)', icon, () => openShippingRatesEditor()),
-                    mk('📊', 'Verkaufsbericht (PDF + Excel)', icon, () => openReport('sales')),
+                    mk('📄 Artikeldetails', 'Artikeldaten ohne Nachrichtenverlauf als PDF exportieren', '', () => run({ articleOnly: true })),
+                    mk('📝 Prüfen', 'Artikeldaten vor dem PDF-Export bearbeiten', ghost, () => run({ articleOnly: true, review: true })),
+                    backupButton(),
+                    mk('⚙️', 'Einstellungen & gespeicherte Felder', icon, () => openSettings())
+                );
+                return bar;
+            }
+            if (mode === 'article') {
+                bar.append(
+                    mk('💾 Artikel speichern', 'Angebotsdaten und ausgewählte Originalbilder lokal sichern', '', () => saveCurrentArticle()),
+                    mk('🧩', 'Nicht zugeordnete Felder anzeigen', icon, () => openUnmappedFields()),
+                    backupButton(),
                     mk('⚙️', 'Einstellungen', icon, () => openSettings())
                 );
+                return bar;
+            }
+            if (mode === 'order' || mode === 'purchase-order') {
+                const purchase = mode === 'purchase-order';
+                const invoiceButton = mk(purchase ? '🧾 Kaufbeleg' : '🧾 Rechnung', 'Beleg dieser Bestellung erstellen', '', () => createInvoice(orderId()));
+                bar.append(
+                    invoiceButton,
+                    mk('✏️ Beträge', 'Preis, Versand, Erstattung, Gebühren und Erwerbsangaben dieser Bestellung korrigieren', ghost, () => editOrder(orderId())),
+                    ...(!purchase ? [
+                        mk('🚚', 'Versandkosten-Tabelle (gültig ab …)', icon, () => openShippingRatesEditor()),
+                        mk('📊', 'Verkaufsbericht (PDF + Excel)', icon, () => openReport('sales'))
+                    ] : []),
+                    mk('🧩', 'Nicht zugeordnete Felder anzeigen', icon, () => openUnmappedFields()),
+                    backupButton(),
+                    mk('⚙️', 'Einstellungen', icon, () => openSettings())
+                );
+                const refreshInvoice = async () => {
+                    try {
+                        const order = await dbGet('orders', orderId());
+                        if (!order) return;
+                        const changed = Object.keys(order.overrides || {}).length > 0 || order.shippingActual?.source === 'manual';
+                        invoiceButton.classList.toggle(`${UI_PREFIX}-btn--attention`, changed);
+                        invoiceButton.style.backgroundColor = changed ? '' : order.invoiceCreatedAt ? '#b5e941' : '';
+                        invoiceButton.style.color = !changed && order.invoiceCreatedAt ? '#1d4b00' : '';
+                        const text = order.invoiceCreatedAt
+                            ? `${purchase ? 'Kaufbeleg' : 'Rechnung'} erstellt am ${new Date(order.invoiceCreatedAt).toLocaleDateString('de-DE')}`
+                            : purchase ? '🧾 Kaufbeleg' : '🧾 Rechnung';
+                        if (invoiceButton.textContent !== text) invoiceButton.textContent = text;
+                    } catch (err) {
+                        console.error('[MPE] Belegstatus konnte nicht geladen werden:', err);
+                    }
+                };
+                void refreshInvoice();
+                const invoiceTimer = setInterval(() => {
+                    if (!bar.isConnected) clearInterval(invoiceTimer);
+                    else void refreshInvoice();
+                }, 1000);
                 return bar;
             }
             if (mode === 'sales' || mode === 'purchases') {
@@ -2036,6 +2885,8 @@
                         ? mk('📊 Verkaufsbericht', 'Verkaufsbericht (PDF + Excel), Tabelle vorher bearbeitbar', '', () => openReport('sales'))
                         : mk('📊 Kaufbericht', 'Kaufbericht (PDF + Excel), Tabelle vorher bearbeitbar', '', () => openReport('purchases')),
                     ...(mode === 'sales' ? [mk('🚚', 'Versandkosten-Tabelle (gültig ab …)', icon, () => openShippingRatesEditor())] : []),
+                    mk('🧩', 'Nicht zugeordnete Felder anzeigen', icon, () => openUnmappedFields()),
+                    backupButton(),
                     mk('⚙️', 'Einstellungen', icon, () => openSettings())
                 );
                 return bar;
@@ -2052,7 +2903,7 @@
                 );
             }
             const settingsBtn = mk('⚙️', 'Einstellungen & gespeicherte Felder', icon, () => openSettings());
-            bar.append(settingsBtn);
+            bar.append(mk('🧩', 'Nicht zugeordnete Felder anzeigen', icon, () => openUnmappedFields()), backupButton(), settingsBtn);
             const badge = document.createElement('span');
             badge.className = `${UI_PREFIX}-badge`;
             bar.append(badge);
@@ -2082,6 +2933,11 @@
             settings: store,
             run,
             openSettings,
+            saveArticle: saveCurrentArticle,
+            openUnmappedFields,
+            openBackupDialog,
+            exportBackup,
+            importBackup,
             createToolbar,
             createInvoice,
             ollamaGenerate: (prompt, opts) => ollamaGenerate(store.get(), prompt, opts),
@@ -2107,7 +2963,14 @@
         rasterizeSvgUrl,
         dbGet,
         dbPut,
+        rememberContact,
+        getContacts,
+        moneyFieldValue,
         mergeKnown,
+        mergeArticleValues,
+        stripSecrets,
+        containsSecretKey,
+        validateBackup,
         toast,
         detectCarrier,
         findTrackingNumber,
@@ -2117,6 +2980,7 @@
         toCents,
         computeOrderAmounts,
         computePurchaseAmounts,
+        buildOrderDocumentModel,
         holdingPeriod,
         saveOrder,
         priceAt,

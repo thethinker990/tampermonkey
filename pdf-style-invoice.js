@@ -1,11 +1,11 @@
 /**
  * PdfSharedTheme – Rechnungs-Stylesheet: Rechnung (DIN 5008 Form B, hochkant), Verkaufs- und Kaufbericht (quer).
- * Version: 4.0.0
+ * Version: 4.2.0
  *
  * Geschäftsdokumente ohne Chat-Bausteine; setzt pdf-style-core.js voraus.
  *
  * Einbindung (Reihenfolge: core, article, chat, invoice; Versions-Parameter erzwingt Neuladen aus dem Tampermonkey-Cache):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-invoice.js?v=4.0.0
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-invoice.js?v=4.2.0
  */
 (function (global) {
     'use strict';
@@ -109,7 +109,8 @@
         const s = inv.seller || {};
         const pageWidth = mm(210);
         const footer = `${META_LABELS.EXPORTED_AT} ${inv.exportedAt} mit ${inv.scriptLabel}`;
-        const subject = `${inv.brand}-Rechnung \u2022 Bestellung ${o.orderId || 'n/a'}`;
+        const documentLabel = inv.purchase ? 'Kaufbeleg' : 'Rechnung';
+        const subject = `${inv.brand}-${documentLabel} \u2022 Bestellung ${o.orderId || 'n/a'}`;
         const logo = logoNode(inv.platform, { absolutePosition: { x: pageWidth - DIN.margins[2] - LOGO_WIDTH, y: DIN.logoTop } });
 
         const returnLine = [s.name, ...(s.lines || [])].filter(Boolean).join(' \u00b7 ');
@@ -121,14 +122,14 @@
                 { text: s.name || '', bold: true },
                 ...(s.lines || []).map((l) => ({ text: l })),
                 s.username ? { text: `${inv.brand}-Nutzername: ${s.username}`, margin: [0, 2, 0, 0] } : null,
-                { ...labelValueTable([['Rechnungsdatum', o.invoiceDate]]), margin: [0, 8, 0, 0] }
+                { ...labelValueTable([[inv.purchase ? 'Belegdatum' : 'Rechnungsdatum', o.invoiceDate]]), margin: [0, 8, 0, 0] }
             ].filter(Boolean)
         };
 
         const orderTable = labelValueTable([
             ['Bestellnummer', valueOrLink(o.orderId, o.orderUrl)],
             ['Verkaufsprotokollnr.', o.recordNumber],
-            ['Verkauft am', o.soldDate],
+            [inv.purchase ? 'Gekauft am' : 'Verkauft am', o.soldDate],
             ['Bezahlt am', o.paidDate],
             ['Zahlungsart', o.paymentMethod ? valueOrLink(o.paymentMethod.label, o.paymentMethod.url) : '']
         ]);
@@ -154,7 +155,11 @@
         }
 
         const neg = (c) => (c === null || c === undefined ? null : -Math.abs(c));
-        const sumRows = [
+        const sumRows = (inv.purchase ? [
+            ['Artikelpreis gesamt', a.itemsTotal],
+            ['Versand / Gebühren / Erstattungen (Differenz)', a.fees],
+            ['Gesamtbetrag', a.total, true]
+        ] : [
             ['Artikelpreis gesamt', a.itemsTotal],
             ['Versanderlös', a.shippingCharged],
             ['Zwischensumme', a.subtotal, true],
@@ -163,7 +168,7 @@
             ['Transaktionsgebühren', neg(a.transactionFee)],
             ['Anzeigengebühren', neg(a.adFee)],
             ['Gesamtbetrag', a.total, true]
-        ].map(([label, cents, bold]) => [{ text: label, bold: Boolean(bold) }, { text: eur(cents), alignment: 'right', bold: Boolean(bold) }]);
+        ]).map(([label, cents, bold]) => [{ text: label, bold: Boolean(bold) }, { text: eur(cents), alignment: 'right', bold: Boolean(bold) }]);
 
         const content = [
             logo,
@@ -177,7 +182,7 @@
             inv.note ? { text: inv.note, fontSize: 8.5, color: muted, margin: [0, 16, 0, 0] } : null
         ].filter(Boolean);
         return documentShell({
-            title: `${inv.brand}-Rechnung ${o.orderId || ''}`,
+            title: `${inv.brand}-${documentLabel} ${o.orderId || ''}`,
             subject,
             author: inv.scriptLabel,
             footerNote: footer,

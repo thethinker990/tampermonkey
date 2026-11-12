@@ -1,11 +1,11 @@
 /**
  * PdfSharedTheme – Nachrichten-Stylesheet: Chat-Meta, Bubbles, Preisvorschläge, Systemnachrichten, Chat-PDF.
- * Version: 4.0.0
+ * Version: 4.2.0
  *
  * buildExportDocument setzt Nachrichtenverlauf + Artikelseite zusammen; setzt pdf-style-core.js und pdf-style-article.js voraus.
  *
  * Einbindung (Reihenfolge: core, article, chat, invoice; Versions-Parameter erzwingt Neuladen aus dem Tampermonkey-Cache):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-chat.js?v=4.0.0
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-chat.js?v=4.2.0
  */
 (function (global) {
     'use strict';
@@ -587,13 +587,13 @@
         const meta = model.meta || {};
         const platform = resolvePlatform(model.platform);
         const title = composeTitle(meta);
-        const content = [buildTitleBar(title, platform), buildChatMetaSection(model)];
+        const content = model.articleOnly ? [] : [buildTitleBar(title, platform), buildChatMetaSection(model)];
 
-        const notice = buildSecurityNoticeNode(model.securityNotice, platform);
+        const notice = model.articleOnly ? null : buildSecurityNoticeNode(model.securityNotice, platform);
         if (notice) content.push(notice);
-        if (Array.isArray(model.messages) && model.messages.length) {
+        if (!model.articleOnly && Array.isArray(model.messages) && model.messages.length) {
             content.push(...buildChatHistoryNodes(model.messages, { platform, partnerAvatar: model.partnerAvatar }));
-        } else {
+        } else if (!model.articleOnly) {
             content.push({ text: 'Kein Nachrichtenverlauf vorhanden.', alignment: 'center', italics: true, color: TOKENS.colors.textMuted, margin: [0, 14, 0, 14] });
         }
         if (Array.isArray(model.chatImages) && model.chatImages.length) {
@@ -601,7 +601,7 @@
         }
 
         if (model.includeAdPage !== false) {
-            content.push(buildTitleBar(title, platform, { pageBreak: 'before' }));
+            content.push(buildTitleBar(title, platform, model.articleOnly ? {} : { pageBreak: 'before' }));
             content.push(buildAdMetaSection(model));
             content.push(...buildDescriptionBlock(model.description, platform));
             if (Array.isArray(model.adImages) && model.adImages.length) {
@@ -616,9 +616,9 @@
             pageMargins: TOKENS.page.margins,
             defaultStyle: { fontSize: TOKENS.page.defaultFontSize, lineHeight: TOKENS.page.defaultLineHeight },
             info: {
-                title: `${model.platformLabel || ''} Chat - ${title}`,
+                title: `${model.platformLabel || ''} ${model.articleOnly ? 'Artikeldetails' : 'Chat'} - ${title}`,
                 author: model.scriptLabel || '',
-                subject: `Konversation ${meta.conversationId || ''} zu Anzeige ${meta.adId || ''}`
+                subject: model.articleOnly ? `Artikeldetails zu Anzeige ${meta.adId || ''}` : `Konversation ${meta.conversationId || ''} zu Anzeige ${meta.adId || ''}`
             },
             footer: buildPageFooter(),
             pageBreakBefore: pageBreakBeforeKeepWithNext,
