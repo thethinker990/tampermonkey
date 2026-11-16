@@ -1,19 +1,19 @@
 /**
  * MarketplaceExportCore – gemeinsame Ablauf-Bibliothek für alle Marktplatz-PDF-Exporter.
- * Version: 4.2.0
+ * Version: 4.2.1
  *
  * Verantwortung: Export-Pipeline, IndexedDB (Overrides je Konversation), Einstellungs-/Feld-Popup,
  * Toasts, HTTP/Bilder, Übersetzung (DeepL -> lokales LLM), Ollama-Client, PDF-Auslieferung.
  * Darstellung macht PdfSharedTheme (pdf-style-*.js), Seiten-Auslesen der jeweilige Adapter.
  *
  * Einbindung (Reihenfolge: pdfmake, vfs_fonts, pdf-lib, [xlsx], pdf-style-core, -article, -chat, [-invoice], Core):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/marketplace-export-core.js?v=4.2.0
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/marketplace-export-core.js?v=4.2.1
  * Benötigte Grants im Userscript: GM_xmlhttpRequest, GM_getValue, GM_setValue, GM_listValues
  */
 (function (global) {
     'use strict';
 
-    const VERSION = '4.2.0';
+    const VERSION = '4.2.1';
     const DB_NAME = 'MarketplacePdfExport';
     const DB_VERSION = 3;
     const UI_PREFIX = 'mpe';
@@ -2568,7 +2568,7 @@
                 const images = await Promise.all(model.items.map((i) => (i.imageUrl ? fetchImage(i.imageUrl, 'artikel.jpg') : null)));
                 model.items.forEach((it, n) => { it.imageDataUrl = images[n] ? images[n].dataUrl : ''; });
                 const bytes = await renderPdfBytes(Theme.buildInvoiceDocument(model));
-                const title = sanitizeFilename((order.items && order.items[0] && order.items[0].title) || '', 70);
+                const title = sanitizeFilename((order.items && order.items[0] && order.items[0].title) || '', 160);
                 // Rechnungsdatum = Zahldatum (wie im Dokument)
                 const documentLabel = model.purchase ? 'Kaufbeleg' : 'Rechnung';
                 const filename = `${order.paidDate || order.soldDate || formatDateIso()} ${sanitizeFilename(brand)} ${documentLabel} ${order.orderId} ${title}.pdf`;
@@ -2860,7 +2860,9 @@
                     try {
                         const order = await dbGet('orders', orderId());
                         if (!order) return;
-                        const changed = Object.keys(order.overrides || {}).length > 0 || order.shippingActual?.source === 'manual';
+                        const amounts = purchase ? computePurchaseAmounts(order) : computeOrderAmounts(order);
+                        const changed = Boolean(order.invoiceCreatedAt && order.invoiceAmounts &&
+                            amounts.total !== order.invoiceAmounts.total);
                         invoiceButton.classList.toggle(`${UI_PREFIX}-btn--attention`, changed);
                         invoiceButton.style.backgroundColor = changed ? '' : order.invoiceCreatedAt ? '#b5e941' : '';
                         invoiceButton.style.color = !changed && order.invoiceCreatedAt ? '#1d4b00' : '';

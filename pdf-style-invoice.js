@@ -1,11 +1,11 @@
 /**
  * PdfSharedTheme – Rechnungs-Stylesheet: Rechnung (DIN 5008 Form B, hochkant), Verkaufs- und Kaufbericht (quer).
- * Version: 4.2.0
+ * Version: 4.2.1
  *
  * Geschäftsdokumente ohne Chat-Bausteine; setzt pdf-style-core.js voraus.
  *
  * Einbindung (Reihenfolge: core, article, chat, invoice; Versions-Parameter erzwingt Neuladen aus dem Tampermonkey-Cache):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-invoice.js?v=4.2.0
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-invoice.js?v=4.2.1
  */
 (function (global) {
     'use strict';
