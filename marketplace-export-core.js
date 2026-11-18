@@ -1,19 +1,19 @@
 /**
  * MarketplaceExportCore – gemeinsame Ablauf-Bibliothek für alle Marktplatz-PDF-Exporter.
- * Version: 4.2.1
+ * Version: 4.3.0
  *
  * Verantwortung: Export-Pipeline, IndexedDB (Overrides je Konversation), Einstellungs-/Feld-Popup,
  * Toasts, HTTP/Bilder, Übersetzung (DeepL -> lokales LLM), Ollama-Client, PDF-Auslieferung.
  * Darstellung macht PdfSharedTheme (pdf-style-*.js), Seiten-Auslesen der jeweilige Adapter.
  *
  * Einbindung (Reihenfolge: pdfmake, vfs_fonts, pdf-lib, [xlsx], pdf-style-core, -article, -chat, [-invoice], Core):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/marketplace-export-core.js?v=4.2.1
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/marketplace-export-core.js?v=4.3.0
  * Benötigte Grants im Userscript: GM_xmlhttpRequest, GM_getValue, GM_setValue, GM_listValues
  */
 (function (global) {
     'use strict';
 
-    const VERSION = '4.2.1';
+    const VERSION = '4.3.0';
     const DB_NAME = 'MarketplacePdfExport';
     const DB_VERSION = 3;
     const UI_PREFIX = 'mpe';
@@ -963,7 +963,7 @@
      * sections: [{ title, hint, fields: [{ key, label, type, options, value, original, wide, hint, missing }] }]
      * buttons:  [{ label, value, primary }]  -> Promise<{ button, values }> bzw. null bei Abbruch
      */
-    function openForm({ title, hint, sections, buttons }) {
+    function openForm({ title, hint, sections, buttons, validate }) {
         return new Promise((resolve) => {
             document.getElementById(`${UI_PREFIX}-modal`)?.remove();
             const overlay = document.createElement('div');
@@ -1046,6 +1046,15 @@
                     }
                     const values = {};
                     inputs.forEach((getter, key) => { values[key] = getter(); });
+                    if (validate) {
+                        try {
+                            validate(b.value, values);
+                        } catch (err) {
+                            console.error('[MPE] Formularprüfung fehlgeschlagen:', err);
+                            toast(`Ungültige Eingabe: ${err.message || err}`, { type: 'error', sticky: true });
+                            return;
+                        }
+                    }
                     close({ button: b.value, values });
                 });
                 bar.appendChild(btn);
@@ -1342,12 +1351,14 @@
         return { itemsTotal, shippingCharged, subtotal, refund, shippingActual, transactionFee, adFee, total: subtotal - refund - (shippingActual || 0) - transactionFee - adFee };
     }
 
-    /** Käufe (Rolle Käufer): Gebühren = Gesamtbetrag − Artikelpreis (Versand, Rückerstattungen …). */
+    /** Käufe: Erstattungen getrennt vom ursprünglichen Gesamtbetrag ausweisen. */
     function computePurchaseAmounts(order) {
         const ov = order.overrides || {};
         const itemsTotal = ov.itemsTotal ?? (order.items || []).reduce((s, i) => s + (i.total || 0), 0);
-        const total = ov.total ?? ((order.paid && order.paid.total) || itemsTotal);
-        return { itemsTotal, total, fees: total - itemsTotal };
+        const grossTotal = ov.total ?? order.paid?.total ?? itemsTotal;
+        const refund = order.purchaseEdits?.fullRefund ? grossTotal : (ov.refund ?? order.paid?.refund ?? 0);
+        const total = grossTotal - refund;
+        return { itemsTotal, grossTotal, refund, total, fees: grossTotal - itemsTotal };
     }
 
     const dateDe = (iso) => (iso ? iso.split('-').reverse().join('.') : '');
@@ -1368,7 +1379,7 @@
         ['transactionFee', 'Transaktionsgebühren'],
         ['adFee', 'Anzeigengebühren']
     ];
-    const PURCHASE_FIELDS = [['itemsTotal', 'Artikelpreis'], ['total', 'Gesamtbetrag']];
+    const PURCHASE_FIELDS = [['itemsTotal', 'Artikelpreis'], ['total', 'Gesamtbetrag vor Erstattung'], ['refund', 'Erstattungsbetrag']];
     const ACQUISITION_FIELDS = [
         { key: 'acquiredAt', label: 'Erworben am (TT.MM.JJJJ)' },
         { key: 'acquiredFrom', label: 'Erworben von', type: 'select', options: [['', '–'], ['Privatkauf', 'Privatkauf'], ['Gewerblicher Kauf', 'Gewerblicher Kauf']] },
@@ -1381,7 +1392,9 @@
     function orderEditValues(order) {
         if (order.role === 'BUYER') {
             const p = computePurchaseAmounts(order);
-            return Object.fromEntries(PURCHASE_FIELDS.map(([k]) => [k, eurInput(p[k])]));
+            return Object.fromEntries(PURCHASE_FIELDS.map(([k]) => [k, eurInput(
+                k === 'total' ? p.grossTotal : k === 'refund' ? (order.overrides?.refund ?? order.paid?.refund ?? 0) : p[k]
+            )]));
         }
         const cur = computeOrderAmounts(order);
         const acq = order.acquisition || {};
@@ -1402,13 +1415,41 @@
         const next = { ...order, overrides: {} };
         for (const [k] of buyer ? PURCHASE_FIELDS : AMOUNT_FIELDS) {
             const v = toCents(values[k], true);
-            if (v !== null && v !== auto[k]) next.overrides[k] = v;
+            if (buyer && k === 'refund' && values[k] && v === null) throw new Error('Der Erstattungsbetrag ist ungültig.');
+            const original = buyer && k === 'total' ? auto.grossTotal : buyer && k === 'refund' ? (order.paid?.refund ?? 0) : auto[k];
+            if (v !== null && v !== original) next.overrides[k] = v;
         }
         if (next.overrides.shippingActual !== undefined) {
             next.shippingActual = { cents: next.overrides.shippingActual, carrier: '', product: 'manuell', source: 'manual' };
             delete next.overrides.shippingActual;
         }
-        if (!buyer) {
+        if (buyer && Object.prototype.hasOwnProperty.call(values, 'sellerName')) {
+            const paidDate = values.paidDate ? toIsoDate(values.paidDate) : '';
+            if (values.paidDate) {
+                const parsed = new Date(`${paidDate}T00:00:00Z`);
+                if (!/^\d{2}\.\d{2}\.\d{4}$/.test(values.paidDate) || !paidDate || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== paidDate) {
+                    throw new Error('Das Bezahldatum ist ungültig. Bitte TT.MM.JJJJ verwenden.');
+                }
+            }
+            const itemTitles = {};
+            (order.items || []).forEach((item, index) => {
+                const title = values[`itemTitle${index}`];
+                if (title && title !== item.title) itemTitles[item.itemId || String(index)] = title;
+            });
+            next.purchaseEdits = {
+                sellerName: values.sellerName !== (order.seller?.name || '') ? values.sellerName : '',
+                sellerAddress: values.sellerAddress !== (order.seller?.address || []).join('\n') ? values.sellerAddress : '',
+                paidDate: paidDate !== (order.paidDate || '') ? paidDate : '',
+                shippingService: values.shippingService !== (order.shippingService || '') ? values.shippingService : '',
+                shippingCarrier: values.shippingCarrier !== (order.shippingCarrier || '') ? values.shippingCarrier : '',
+                itemTitles,
+                fullRefund: Boolean(values.fullRefund)
+            };
+        }
+        if (buyer) {
+            const amounts = computePurchaseAmounts({ ...next, purchaseEdits: { ...next.purchaseEdits, fullRefund: false } });
+            if (amounts.refund > amounts.grossTotal) throw new Error('Der Erstattungsbetrag darf den ursprünglichen Gesamtbetrag nicht übersteigen.');
+        } else {
             next.acquisition = {
                 date: toIsoDate(values.acquiredAt) || '',
                 from: values.acquiredFrom || '',
@@ -1418,6 +1459,26 @@
             };
         }
         return next;
+    }
+
+    function effectivePurchaseOrder(order) {
+        if (order.role !== 'BUYER') return order;
+        const edits = order.purchaseEdits || {};
+        return {
+            ...order,
+            seller: {
+                ...order.seller,
+                name: edits.sellerName || order.seller?.name,
+                address: edits.sellerAddress ? edits.sellerAddress.split(/\r?\n/).filter(Boolean) : order.seller?.address
+            },
+            paidDate: edits.paidDate || order.paidDate,
+            shippingService: edits.shippingService || order.shippingService,
+            shippingCarrier: edits.shippingCarrier || order.shippingCarrier,
+            items: (order.items || []).map((item, index) => ({
+                ...item,
+                title: edits.itemTitles?.[item.itemId || String(index)] || item.title
+            }))
+        };
     }
 
     /** Neue Seitendaten speichern; bekannte Werte, manuelle Werte (overrides, manuell gewählte Versandkosten) und Erwerbsangaben bleiben erhalten. */
@@ -1430,6 +1491,14 @@
             shippingActual: keepManualShipping ? old.shippingActual : fresh.shippingActual || (old && old.shippingActual) || null,
             updatedAt: new Date().toISOString()
         };
+        if (order.role === 'BUYER' && old) {
+            order.seller = mergeKnown(old.seller, fresh.seller);
+            order.paid = mergeKnown(old.paid, fresh.paid);
+            if (fresh.items?.length && old.items?.length) {
+                order.items = fresh.items.map((item) => mergeKnown(old.items.find((previous) => previous.itemId && previous.itemId === item.itemId), item));
+                order.items.push(...old.items.filter((item) => !item.itemId || !fresh.items.some((current) => current.itemId === item.itemId)));
+            }
+        }
         await dbPut('orders', order);
         const changed = Boolean(old && JSON.stringify(computeOrderAmounts(old)) !== JSON.stringify(computeOrderAmounts(order)));
         return { order, changed, isNew: !old };
@@ -1726,6 +1795,7 @@
     /** Popup: Beträge und Erwerbsangaben einer Bestellung korrigieren (Overrides) inkl. Auswahl des Versandtarifs. */
     async function openOrderEditor(order, reason = '') {
         const purchase = order.role === 'BUYER';
+        const effective = effectivePurchaseOrder(order);
         const carriers = await getShippingRates();
         const auto = orderEditValues({ ...order, overrides: {} });
         const cur = orderEditValues(order);
@@ -1741,12 +1811,25 @@
         if (!purchase) fields.push({ key: 'shippingProduct', label: `Versandtarif zum ${dateDe(date)} (setzt „Versandkosten“)`, type: 'select', options, value: '', wide: true });
         const answer = await openForm({
             title: `✏️ Bestellung ${order.orderId} – Beträge & Erwerb`,
-            hint: [reason, `Versandservice laut Bestellung: ${order.shippingService || 'n/a'}. Beträge in EUR, orange = manuell geändert.`].filter(Boolean).join(' · '),
+            hint: [reason, `Versandservice laut Bestellung: ${order.shippingService || 'n/a'}. Beträge in EUR, orange = manuell geändert.`, purchase ? 'Bei Erstattung den ursprünglichen Gesamtbetrag vor Erstattung prüfen und gegebenenfalls korrigieren.' : ''].filter(Boolean).join(' · '),
             sections: [
                 { title: 'Beträge (werden in der Datenbank gespeichert)', fields },
+                ...(purchase ? [{
+                    title: 'Kaufbeleg und Rückgabe',
+                    fields: [
+                        { key: 'sellerName', label: 'Verkäufername (Klarname)', value: effective.seller?.name || '' },
+                        { key: 'sellerAddress', label: 'Anschrift des Verkäufers', type: 'textarea', value: (effective.seller?.address || []).join('\n') },
+                        { key: 'paidDate', label: 'Bezahlt am (TT.MM.JJJJ)', value: dateDe(effective.paidDate) },
+                        { key: 'shippingService', label: 'Versandservice', value: effective.shippingService || '' },
+                        { key: 'shippingCarrier', label: 'Versanddienstleister', value: effective.shippingCarrier || '' },
+                        ...(effective.items || []).map((item, index) => ({ key: `itemTitle${index}`, label: `Artikelname ${index + 1}`, value: item.title || '', wide: true })),
+                        { key: 'fullRefund', label: 'Vollständig erstattet / Rückgabe (Gesamtbetrag 0 EUR)', type: 'checkbox', value: order.purchaseEdits?.fullRefund }
+                    ]
+                }] : []),
                 ...(!purchase ? [{ title: 'Erwerb (Verkaufsbericht: Haltedauer, Anschaffungspreis, Ertrag)', fields: ACQUISITION_FIELDS.map((f) => ({ ...f, value: cur[f.key] })) }] : [])
             ],
-            buttons: [{ label: 'Abbrechen', value: null }, { label: 'Manuelle Beträge löschen', value: 'reset' }, { label: 'Speichern', value: 'save', primary: true }]
+            buttons: [{ label: 'Abbrechen', value: null }, { label: 'Manuelle Beträge löschen', value: 'reset' }, { label: 'Speichern', value: 'save', primary: true }],
+            validate: (button, values) => { if (button === 'save') applyOrderEdits(order, values); }
         });
         if (!answer) return null;
         let next;
@@ -1774,6 +1857,7 @@
     }
 
     function buildOrderDocumentModel(order, ctx) {
+        order = effectivePurchaseOrder(order);
         const purchase = order.role === 'BUYER';
         const a = purchase ? computePurchaseAmounts(order) : computeOrderAmounts(order);
         const sa = order.shippingActual;
@@ -1801,6 +1885,7 @@
                 invoiceDate: dateDe(order.paidDate || order.soldDate),
                 paymentMethod: ctx.paymentMethod,
                 shippingService: order.shippingService,
+                shippingCarrier: order.shippingCarrier,
                 trackingId: order.trackingId,
                 trackingUrl: order.trackingId && CARRIER_TRACKING_URLS[carrier] ? CARRIER_TRACKING_URLS[carrier](order.trackingId) : '',
                 shippedDate: dateDe(order.shippedDate),
@@ -2568,10 +2653,11 @@
                 const images = await Promise.all(model.items.map((i) => (i.imageUrl ? fetchImage(i.imageUrl, 'artikel.jpg') : null)));
                 model.items.forEach((it, n) => { it.imageDataUrl = images[n] ? images[n].dataUrl : ''; });
                 const bytes = await renderPdfBytes(Theme.buildInvoiceDocument(model));
-                const title = sanitizeFilename((order.items && order.items[0] && order.items[0].title) || '', 160);
+                const effective = effectivePurchaseOrder(order);
+                const title = sanitizeFilename((effective.items && effective.items[0] && effective.items[0].title) || '', 160);
                 // Rechnungsdatum = Zahldatum (wie im Dokument)
                 const documentLabel = model.purchase ? 'Kaufbeleg' : 'Rechnung';
-                const filename = `${order.paidDate || order.soldDate || formatDateIso()} ${sanitizeFilename(brand)} ${documentLabel} ${order.orderId} ${title}.pdf`;
+                const filename = `${effective.paidDate || effective.soldDate || formatDateIso()} ${sanitizeFilename(brand)} ${documentLabel} ${order.orderId} ${title}.pdf`;
                 const url = deliverPdf(bytes, filename, store.get().deliveryMode);
                 await dbPut('orders', { ...order, invoiceCreatedAt: new Date().toISOString(), invoiceAmounts: model.amounts });
                 toast(`🧾 ${documentLabel} erstellt: ${filename}`, {
@@ -2681,14 +2767,16 @@
             const t = { items: 0, fees: 0, total: 0 };
             const rows = [];
             const xlsx = [];
-            for (const o of orders) {
+            for (const raw of orders) {
+                const o = effectivePurchaseOrder(raw);
                 const p = computePurchaseAmounts(o);
+                const fees = p.fees - p.refund;
                 t.items += p.itemsTotal;
-                t.fees += p.fees;
+                t.fees += fees;
                 t.total += p.total;
                 const seller = (o.seller && o.seller.username) || 'n/a';
-                rows.push([dateDe(o.soldDate), { text: o.orderId, url: o.orderUrl }, { lines: [...itemLines(o), { label: 'Verkäufer: ', text: seller, muted: true }] }, p.itemsTotal, p.fees, p.total]);
-                for (const { i, first, lineTotal } of xlsxItemLines(o, p.total)) xlsx.push([xlsxDate(o.soldDate), o.orderId, i.itemId || '', i.title || '', seller, euro(i.total || 0), first ? euro(p.fees) : 0, euro(lineTotal)]);
+                rows.push([dateDe(o.soldDate), { text: o.orderId, url: o.orderUrl }, { lines: [...itemLines(o), { label: 'Verkäufer: ', text: seller, muted: true }] }, p.itemsTotal, fees, p.total]);
+                for (const { i, first, lineTotal } of xlsxItemLines(o, p.total)) xlsx.push([xlsxDate(o.soldDate), o.orderId, i.itemId || '', i.title || '', seller, euro(i.total || 0), first ? euro(fees) : 0, euro(lineTotal)]);
             }
             return {
                 sheet: 'Käufe',
@@ -2722,7 +2810,7 @@
                 columns,
                 rows: orders.map((o) => ({
                     id: o.orderId,
-                    info: [(o.items || []).map((i) => i.title).join(', ') || 'n/a', `${dateDe(o.soldDate)} · ${o.orderId}`],
+                    info: [(effectivePurchaseOrder(o).items || []).map((i) => i.title).join(', ') || 'n/a', `${dateDe(o.soldDate)} · ${o.orderId}`],
                     values: orderEditValues(o),
                     originals: orderEditValues({ ...o, overrides: {} })
                 })),
@@ -2897,6 +2985,9 @@
                 mk('📄 PDF-Export', 'PDF mit Nachrichtenverlauf, Anzeige & Bildern erstellen', '', () => run()),
                 mk('📝 Prüfen', 'Felder vor dem Export prüfen/ändern', ghost, () => run({ review: true }))
             );
+            if (caps.articleFromChat) {
+                bar.append(mk('📄 Artikeldetails', 'Artikeldaten ohne Nachrichtenverlauf als PDF exportieren', ghost, () => run({ articleOnly: true })));
+            }
             if (caps.invoice) {
                 bar.append(
                     mk('🧾', 'Rechnung zur Bestellung dieser Konversation', icon, () => (orderId() ? createInvoice(orderId()) : toast('Zu dieser Konversation gibt es keine Bestellnummer.', { type: 'warn', timeoutMs: 4000 }))),

@@ -1,11 +1,11 @@
 /**
  * PdfSharedTheme – Rechnungs-Stylesheet: Rechnung (DIN 5008 Form B, hochkant), Verkaufs- und Kaufbericht (quer).
- * Version: 4.2.1
+ * Version: 4.3.0
  *
  * Geschäftsdokumente ohne Chat-Bausteine; setzt pdf-style-core.js voraus.
  *
  * Einbindung (Reihenfolge: core, article, chat, invoice; Versions-Parameter erzwingt Neuladen aus dem Tampermonkey-Cache):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-invoice.js?v=4.2.1
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-invoice.js?v=4.3.0
  */
 (function (global) {
     'use strict';
@@ -135,6 +135,7 @@
         ]);
         const shippingTable = labelValueTable([
             ['Versandservice', o.shippingService || 'n/a'],
+            ['Versanddienstleister', o.shippingCarrier],
             ['Sendungsnummer', valueOrLink(o.trackingId, o.trackingUrl)],
             ['Versand am', o.shippedDate],
             ['Zugestellt am', o.deliveredDate]
@@ -157,7 +158,8 @@
         const neg = (c) => (c === null || c === undefined ? null : -Math.abs(c));
         const sumRows = (inv.purchase ? [
             ['Artikelpreis gesamt', a.itemsTotal],
-            ['Versand / Gebühren / Erstattungen (Differenz)', a.fees],
+            ['Versand / Gebühren (Differenz)', a.fees],
+            ...(a.refund ? [['Rückerstattung', neg(a.refund)]] : []),
             ['Gesamtbetrag', a.total, true]
         ] : [
             ['Artikelpreis gesamt', a.itemsTotal],
