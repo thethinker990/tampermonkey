@@ -1,11 +1,11 @@
 /**
  * PdfSharedTheme – Nachrichten-Stylesheet: Chat-Meta, Bubbles, Preisvorschläge, Systemnachrichten, Chat-PDF.
- * Version: 4.4.0
+ * Version: 4.5.0
  *
  * buildExportDocument setzt Nachrichtenverlauf + Artikelseite zusammen; setzt pdf-style-core.js und pdf-style-article.js voraus.
  *
  * Einbindung (Reihenfolge: core, article, chat, invoice; Versions-Parameter erzwingt Neuladen aus dem Tampermonkey-Cache):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-chat.js?v=4.4.0
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-chat.js?v=4.5.0
  */
 (function (global) {
     'use strict';
@@ -50,7 +50,11 @@
         const fees = caps.fees && meta.role === 'SELLER' && !isNa(meta.orderId);
         const listedTotal = sumMoney([meta.listedPrice, meta.listedShipping]);
         const showFee = caps.buyerProtection && parseMoney(meta.buyerProtection).cents > 0;
-        const agreedTotal = sumMoney([meta.price, meta.shipping, showFee ? meta.buyerProtection : 0]);
+        // PayPal (Waren & Dienstleistungen): Gebühr trägt der Verkäufer -> als Verkäufer abziehen, als Käufer nicht addieren.
+        // Direktzahlung/„Sicher bezahlen“: Käuferschutz zahlt der Käufer zusätzlich (Rückmeldung 19.11.2026).
+        const feeMode = !showFee ? 'none' : /^paypal$/i.test(String(meta.paymentMethod || '').trim()) ? (meta.role === 'SELLER' ? 'deduct' : 'info') : 'add';
+        const feeValue = feeMode === 'deduct' ? { special: '', prefix: '', cents: -Math.abs(parseMoney(meta.buyerProtection).cents) } : meta.buyerProtection;
+        const agreedTotal = sumMoney([meta.price, meta.shipping, feeMode === 'add' || feeMode === 'deduct' ? feeValue : 0]);
         // Verkäufer (eBay): Abzüge zusammengefasst; Details stehen in Rechnung und Excel
         const deductionParts = [meta.refund, meta.transactionFee, meta.adFee, meta.shippingActual];
         const deductions = !fees || deductionParts.some(isNa) ? 'n/a' : { special: '', prefix: '', cents: -deductionParts.reduce((s, v) => s + Math.abs(parseMoney(v).cents || 0), 0) };
@@ -60,7 +64,7 @@
         const leftValues = [meta.listedPrice, meta.listedShipping, listedTotal];
         const rightValues = fees
             ? [meta.price, meta.shipping, deductions, earnings]
-            : [meta.price, meta.shipping, showFee ? meta.buyerProtection : null, agreedTotal].filter((v) => v !== null);
+            : [meta.price, meta.shipping, showFee ? feeValue : null, agreedTotal].filter((v) => v !== null);
         const layout = moneyLayout([...leftValues, ...rightValues]);
         // Gemeinsame Spaltenbreite (Beträge/„EUR“ beider Tabellen untereinander); Sondertexte bündig mit der ersten Ziffer
         // des breitesten Betrags der EIGENEN Tabelle. Tabelle ganz ohne Beträge (z. B. Anzeige gelöscht) bleibt linksbündig.
@@ -90,7 +94,7 @@
             : [
                 [`${L.AGREED_PRICE}${pieces}`, cell(meta.price)],
                 [L.AGREED_SHIPPING, cell(meta.shipping)],
-                showFee ? [L.BUYER_PROTECTION, cell(meta.buyerProtection)] : null,
+                showFee ? [feeMode === 'deduct' ? 'PayPal-Gebühr (Käuferschutz)' : feeMode === 'info' ? 'Käuferschutz (zahlt Verkäufer)' : L.BUYER_PROTECTION, cell(feeValue)] : null,
                 [L.TOTAL_AMOUNT, cell(agreedTotal, true)]
             ].filter(Boolean);
 

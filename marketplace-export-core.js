@@ -1,19 +1,19 @@
 /**
  * MarketplaceExportCore – gemeinsame Ablauf-Bibliothek für alle Marktplatz-PDF-Exporter.
- * Version: 4.4.0
+ * Version: 4.5.0
  *
  * Verantwortung: Export-Pipeline, IndexedDB (Overrides je Konversation), Einstellungs-/Feld-Popup,
  * Toasts, HTTP/Bilder, Übersetzung (DeepL -> lokales LLM), Ollama-Client, PDF-Auslieferung.
  * Darstellung macht PdfSharedTheme (pdf-style-*.js), Seiten-Auslesen der jeweilige Adapter.
  *
  * Einbindung (Reihenfolge: pdfmake, vfs_fonts, pdf-lib, [xlsx], pdf-style-core, -article, -chat, [-invoice], Core):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/marketplace-export-core.js?v=4.4.0
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/marketplace-export-core.js?v=4.5.0
  * Benötigte Grants im Userscript: GM_xmlhttpRequest, GM_getValue, GM_setValue, GM_listValues
  */
 (function (global) {
     'use strict';
 
-    const VERSION = '4.4.0';
+    const VERSION = '4.5.0';
     const DB_NAME = 'MarketplacePdfExport';
     const DB_VERSION = 3;
     const UI_PREFIX = 'mpe';
@@ -481,6 +481,8 @@
 
     function gmMirrorPut(store, value) {
         try {
+            // Große Binärdaten (z. B. gesicherte Anzeigenbilder) nicht in den Tampermonkey-Speicher spiegeln
+            if (value && value.noMirror) return;
             if (!MIRROR_EXCLUDED_STORES.has(store) && hasGm() && value && value[STORE_KEYS[store]] !== undefined) GM_setValue(gmKey(store, value[STORE_KEYS[store]]), value);
         } catch (err) {
             console.warn('[MPE] Sicherung im Tampermonkey-Speicher fehlgeschlagen:', err);
@@ -510,6 +512,10 @@
         });
     }
 
+    // Firefox: IndexedDB-/Tampermonkey-Werte gehören einem anderen Speicherbereich (XrayWrapper); eigene Objekte daraus
+    // zu verändern oder Werte anzuhängen wirft „Not allowed to define cross-origin object…“. Daher immer eigene Kopie.
+    const ownCopy = (store, v) => (v && typeof v === 'object' && store !== 'media' ? JSON.parse(JSON.stringify(v)) : v);
+
     async function dbGet(store, key) {
         let value = null;
         try {
@@ -517,8 +523,8 @@
         } catch (err) {
             console.warn('[MPE] DB-Lesefehler:', err);
         }
-        if (value) return value;
-        const backup = gmMirrorGet(store, key);
+        if (value) return ownCopy(store, value);
+        const backup = ownCopy(store, gmMirrorGet(store, key));
         if (backup) await idbRequest(store, 'readwrite', (s) => s.put(backup)).catch(() => {});
         return backup || null;
     }
@@ -533,10 +539,21 @@
         }
     }
 
+    /** Eintrag aus IndexedDB und Tampermonkey-Spiegel entfernen (nur nach ausdrücklicher Bestätigung aufrufen). */
+    async function dbDelete(store, key) {
+        await idbRequest(store, 'readwrite', (s) => s.delete(key));
+        try {
+            if (typeof GM_deleteValue === 'function') GM_deleteValue(gmKey(store, key));
+            else if (hasGm() && GM_getValue(gmKey(store, key), null) !== null) GM_setValue(gmKey(store, key), null);
+        } catch (err) {
+            console.warn('[MPE] Spiegel-Eintrag konnte nicht entfernt werden:', err);
+        }
+    }
+
     async function dbGetAll(store) {
         let rows = [];
         try {
-            rows = (await idbRequest(store, 'readonly', (s) => s.getAll())) || [];
+            rows = Array.from((await idbRequest(store, 'readonly', (s) => s.getAll())) || [], (r) => ownCopy(store, r));
         } catch (err) {
             console.warn('[MPE] DB-Lesefehler:', err);
         }
@@ -546,7 +563,7 @@
             const have = new Set(rows.map((r) => String(r[STORE_KEYS[store]])));
             for (const k of GM_listValues()) {
                 if (!k.startsWith(prefix) || have.has(k.slice(prefix.length))) continue;
-                const v = gmMirrorGet(store, k.slice(prefix.length));
+                const v = ownCopy(store, gmMirrorGet(store, k.slice(prefix.length)));
                 if (v) rows.push(v);
             }
         }
@@ -554,11 +571,11 @@
     }
 
     async function dbGetStrict(store, key) {
-        return (await idbRequest(store, 'readonly', (objectStore) => objectStore.get(key))) || null;
+        return ownCopy(store, (await idbRequest(store, 'readonly', (objectStore) => objectStore.get(key))) || null);
     }
 
     async function dbGetAllStrict(store) {
-        return (await idbRequest(store, 'readonly', (objectStore) => objectStore.getAll())) || [];
+        return Array.from((await idbRequest(store, 'readonly', (objectStore) => objectStore.getAll())) || [], (r) => ownCopy(store, r));
     }
 
     async function rememberContact(platform, adId, source) {
@@ -840,6 +857,8 @@
         { key: 'trackingCarrier', label: 'Versanddienstleister', type: 'select', options: CARRIERS.map((c) => [c, c || '–']) },
         { key: 'returnTrackingId', label: 'Rücksende-Sendungsnummer (leer = keine Rücksendung, „n/a“ = Rücksendung ohne Nummer)' },
         { key: 'buyerName', label: 'Käufername' },
+        { key: 'buyerAddress', label: 'Anschrift des Käufers (für die Rechnung, eine Zeile je Adresszeile)', type: 'textarea', rows: 3, cap: 'conversationInvoice' },
+        { key: 'shippedDate', label: 'Versand am (TT.MM.JJJJ, für die Rechnung)', cap: 'conversationInvoice' },
         { key: 'buyerUrl', label: 'Käufer-Link' },
         { key: 'sellerName', label: 'Verkäufername' },
         { key: 'sellerUrl', label: 'Verkäufer-Link' },
@@ -887,6 +906,168 @@
         const m = /^(\d{5})\s+(.+?)\s+-\s+(.+)$/.exec(s);
         if (m && GERMAN_STATES.includes(m[2]) && !GERMAN_STATES.includes(m[3])) return `${m[1]} ${m[3]} - ${m[2]}`;
         return s;
+    }
+
+    /**
+     * Ort aus den Seitendaten: Stadt aus der Brotkrume „Kleinanzeigen <Stadt>“, Stadtteil in Klammern, Bundesland hinten.
+     * „80935“ + city „Feldmoching-Hasenbergl - Feldmoching“ + region „Bayern“ + Brotkrume „München“ -> „80935 München (Feldmoching) - Bayern“.
+     */
+    function formatKleinanzeigenLocation({ location = '', city = '', region = '', crumbCity = '' }) {
+        const plz = (/\b\d{5}\b/.exec(location) || [''])[0];
+        if (!plz || !region) return normalizeGermanLocation(location);
+        const parts = cleanText(city).split(/\s+-\s+/).filter((p) => p && p !== region);
+        const town = cleanText(crumbCity) || parts[0] || '';
+        const district = parts.length && parts[parts.length - 1] !== town ? parts[parts.length - 1] : '';
+        return `${plz} ${town}${district ? ` (${district})` : ''} - ${region}`.replace(/\s+/g, ' ');
+    }
+
+    /**
+     * Kleinanzeigen-Konversation (Export-Daten inkl. manueller Werte) -> Bestellung im eBay-Rechnungsmodell (Anzeigen-ID = Nummer).
+     * Verkauf: Käufer + Anschrift; PayPal-Gebühr als Transaktionsgebühr. Kauf: bezahlt = Preis + Versand (+ Käuferschutz außer PayPal).
+     * Abholung: kein Versand, Versand/Zustellung = Abholtag, Zahlungsart „Bar bei Abholung“, falls keine andere bekannt ist.
+     */
+    function kleinanzeigenOrderFromMeta(meta, { imageUrl = '' } = {}) {
+        const adId = String(meta.adId || '');
+        if (!/^\d+$/.test(adId)) throw new Error('Anzeigen-ID fehlt – Beleg nicht möglich');
+        const role = meta.role === 'BUYER' ? 'BUYER' : 'SELLER';
+        const giveaway = isGiveaway(meta.adType);
+        const price = giveaway ? 0 : toCents(meta.price, true);
+        if (price === null) throw new Error('Vereinbarter Preis unbekannt – bitte im ⚙️-Popup „Preis (vereinbart)“ eintragen');
+        const pickup = isPickup(meta.shipping) || meta.paymentMethod === 'Bar bei Abholung' || (isPickup(meta.listedShipping) && !/\d/.test(String(meta.shipping || '')));
+        const shipping = pickup ? 0 : toCents(meta.shipping, true) || 0;
+        const fee = toCents(meta.buyerProtection, true) || 0;
+        const paypal = /^paypal$/i.test(String(meta.paymentMethod || '').trim());
+        const date = toIsoDate(meta.transactionDate) || '';
+        const nameOf = (s) => (isNa(s) ? '' : cleanText(String(s || '').replace(/\s*\([^)]*\)\s*$/, '')));
+        const base = {
+            orderId: adId,
+            platform: 'kleinanzeigen',
+            role,
+            orderUrl: meta.adUrl || '',
+            soldDate: date,
+            paidDate: date,
+            shippedDate: toIsoDate(meta.shippedDate) || (pickup ? date : ''),
+            deliveredDate: pickup ? date : '',
+            shippingService: pickup ? 'Abholung' : isNa(meta.trackingCarrier) ? '' : meta.trackingCarrier || '',
+            shippingCarrier: pickup || isNa(meta.trackingCarrier) ? '' : meta.trackingCarrier || '',
+            trackingId: isNa(meta.trackingId) ? '' : meta.trackingId || '',
+            paymentMethod: pickup && (isNa(meta.paymentMethod) || !meta.paymentMethod) ? 'Bar bei Abholung' : isNa(meta.paymentMethod) ? '' : meta.paymentMethod || '',
+            items: [{ itemId: adId, title: meta.adTitle || 'n/a', quantity: 1, unitPrice: price, total: price, imageUrl }]
+        };
+        if (role === 'BUYER') {
+            return { ...base, seller: { name: nameOf(meta.sellerName), username: '' }, paid: { total: price + shipping + (!paypal ? fee : 0), shipping } };
+        }
+        return {
+            ...base,
+            buyer: { name: nameOf(meta.buyerName) },
+            address: String(meta.buyerAddress || '').split(/\r?\n/).map(cleanText).filter(Boolean),
+            paid: { shipping, refund: 0 },
+            fees: { transactionFee: paypal ? fee : 0, adFee: 0 },
+            shippingActual: pickup || (giveaway && !shipping) ? { cents: 0, carrier: '', product: pickup ? 'Abholung' : 'kein Versand', source: 'auto' } : null
+        };
+    }
+
+    const DAY_MS = 86400000;
+    const KA_WARN_DAYS = 35; // 5 Wochen ab Einstelldatum
+    const KA_DELETE_DAYS = 56; // Kleinanzeigen löscht die Anzeige nach ca. 8 Wochen (Angabe des Nutzers)
+
+    /** Alter einer Anzeige ab Einstelldatum (TT.MM.JJJJ): Tage, Warnung ab 5 Wochen, voraussichtliches Löschdatum. */
+    function kleinanzeigenAdAge(createdAt, now = new Date()) {
+        const iso = toIsoDate(createdAt);
+        if (!iso) return null;
+        const today = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+        const days = Math.floor((today - Date.parse(`${iso}T00:00:00Z`)) / DAY_MS);
+        const deleteOn = new Date(Date.parse(`${iso}T00:00:00Z`) + KA_DELETE_DAYS * DAY_MS).toISOString().slice(0, 10);
+        return { days, warn: days >= KA_WARN_DAYS, deleteOn: dateDe(deleteOn) };
+    }
+
+    const DATA_RETENTION_MS = 182 * DAY_MS; // 6 Monate
+
+    /** Abgelaufene Gruppen: neuester Stand älter als 6 Monate und nicht bewusst verlängert. */
+    function expiredDataGroups(rows, now = Date.now()) {
+        const groups = new Map();
+        for (const row of rows) {
+            const m = /^ka:(?:ad|adimg):(\d+)$/.exec(row.key || '');
+            if (!m) continue;
+            const g = groups.get(m[1]) || { adId: m[1], title: '', keys: [], newest: 0, keepUntil: 0, images: 0 };
+            g.keys.push(row.key);
+            g.newest = Math.max(g.newest, Date.parse(row.updatedAt || row.savedAt || '') || 0);
+            g.keepUntil = Math.max(g.keepUntil, Date.parse(row.keepUntil || '') || 0);
+            if (row.key.startsWith('ka:ad:')) g.title = (row.data && row.data.title) || g.title;
+            else g.images = ((row.data && row.data.images) || []).length;
+            groups.set(m[1], g);
+        }
+        return [...groups.values()].filter((g) => g.newest && now - g.newest > DATA_RETENTION_MS && g.keepUntil < now);
+    }
+
+    /**
+     * Gesicherte Kleinanzeigen-Daten (Anzeigentexte/-bilder) nach 6 Monaten: Bestätigungs-Popup, alle vorausgewählt,
+     * „Alle an/ab“. Ausgewählte werden gelöscht, abgewählte um weitere 6 Monate behalten. Belege/Exporte bleiben immer.
+     */
+    async function reviewExpiredKleinanzeigenData() {
+        const rows = (await dbGetAll('cache')).filter((r) => /^ka:(?:ad|adimg):\d+$/.test(r.key || ''));
+        const expired = expiredDataGroups(rows);
+        if (!expired.length) return { deleted: 0, kept: 0 };
+        injectStyles();
+        const selected = await new Promise((resolve) => {
+            const overlay = document.createElement('div');
+            overlay.className = `${UI_PREFIX}-overlay`;
+            const modal = document.createElement('div');
+            modal.className = `${UI_PREFIX}-modal`;
+            modal.innerHTML = `<h3>🗑️ Gesicherte Anzeigendaten älter als 6 Monate</h3><p class="${UI_PREFIX}-hint">Ausgewählte Anzeigen (Texte und gesicherte Bilder) werden aus der lokalen Datenbank gelöscht. Abgewählte bleiben weitere 6 Monate. Exporte, Rechnungen und Belege bleiben immer erhalten.</p>`;
+            const all = document.createElement('label');
+            all.className = `${UI_PREFIX}-check`;
+            const allBox = document.createElement('input');
+            allBox.type = 'checkbox';
+            allBox.checked = true;
+            all.append(allBox, document.createTextNode('Alle auswählen / abwählen'));
+            modal.appendChild(all);
+            const boxes = expired.map((g) => {
+                const lab = document.createElement('label');
+                lab.className = `${UI_PREFIX}-check`;
+                const cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.checked = true;
+                cb.dataset.adId = g.adId;
+                lab.append(cb, document.createTextNode(`${g.title || 'Anzeige'} (${g.adId}) – zuletzt gesichert ${new Date(g.newest).toLocaleDateString('de-DE')}${g.images ? `, ${g.images} Bild(er)` : ''}`));
+                modal.appendChild(lab);
+                cb.addEventListener('change', () => { allBox.checked = boxes.every((b) => b.checked); });
+                return cb;
+            });
+            allBox.addEventListener('change', () => boxes.forEach((b) => { b.checked = allBox.checked; }));
+            const bar = document.createElement('div');
+            bar.className = `${UI_PREFIX}-buttons`;
+            for (const [label, primary, value] of [['Später erinnern', false, null], ['Ausgewählte löschen', true, 'delete']]) {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.textContent = label;
+                b.className = `${UI_PREFIX}-btn${primary ? '' : ` ${UI_PREFIX}-btn--ghost`}`;
+                b.addEventListener('click', () => {
+                    overlay.remove();
+                    resolve(value ? boxes.filter((x) => x.checked).map((x) => x.dataset.adId) : null);
+                });
+                bar.appendChild(b);
+            }
+            modal.appendChild(bar);
+            overlay.appendChild(modal);
+            document.body.appendChild(overlay);
+        });
+        if (!selected) return { deleted: 0, kept: 0, postponed: true };
+        const keepUntil = new Date(Date.now() + DATA_RETENTION_MS).toISOString();
+        let deleted = 0;
+        for (const g of expired) {
+            if (selected.includes(g.adId)) {
+                for (const key of g.keys) await dbDelete('cache', key);
+                deleted += 1;
+            } else {
+                for (const key of g.keys) {
+                    const row = rows.find((r) => r.key === key);
+                    if (row) await dbPut('cache', { ...row, keepUntil });
+                }
+            }
+        }
+        toast(`🗑️ ${deleted} Anzeige(n) gelöscht, ${expired.length - deleted} weitere 6 Monate behalten.`, { type: 'success', timeoutMs: 6000 });
+        return { deleted, kept: expired.length - deleted };
     }
     const MONEY_FIELDS = new Set(['listedPrice', 'listedShipping', 'price', 'shipping', 'buyerProtection']);
     const textToAttributes = (txt) => String(txt || '').split(/\r?\n/).map((l) => {
@@ -2118,7 +2299,8 @@
                 soldDate: dateDe(order.soldDate) || 'n/a',
                 paidDate: dateDe(order.paidDate) || 'n/a',
                 invoiceDate: dateDe(order.paidDate || order.soldDate),
-                paymentMethod: ctx.paymentMethod,
+                paymentMethod: order.paymentMethod ? { label: order.paymentMethod } : ctx.paymentMethod,
+                idLabel: ctx.idLabel || '',
                 shippingService: order.shippingService,
                 shippingCarrier: order.shippingCarrier,
                 trackingId: order.trackingId,
@@ -2128,6 +2310,7 @@
             },
             items: (order.items || []).map((i) => ({ ...i, itemUrl: ctx.itemUrl ? ctx.itemUrl(i.itemId) : '' })),
             amounts: a,
+            transactionFeeLabel: order.platform === 'kleinanzeigen' && /^paypal$/i.test(String(order.paymentMethod || '')) ? 'PayPal-Gebühr (Käuferschutz)' : '',
             shippingActualLabel: sa && sa.product ? [sa.carrier, sa.product].filter(Boolean).join(' ') : ''
         };
     }
@@ -2865,7 +3048,7 @@
         }
 
         const brand = config.brand || config.platformLabel.replace(/\.de$/i, '');
-        const docCtx = () => ({ platform: config.platform, brand, scriptLabel, settings: store.get(), itemUrl: config.itemUrl, paymentMethod: config.paymentMethod });
+        const docCtx = () => ({ platform: config.platform, brand, scriptLabel, settings: store.get(), itemUrl: config.itemUrl, paymentMethod: config.paymentMethod, idLabel: config.invoiceIdLabel });
 
         async function loadOrder(orderId) {
             let order = orderId ? await dbGet('orders', orderId) : null;
@@ -2924,6 +3107,23 @@
                 console.error(`[${config.scriptName}]`, err);
                 toast(`❌ Rechnung fehlgeschlagen: ${err.message || err}`, { type: 'error', sticky: true });
             }
+        }
+
+        /** Beleg zur geöffneten Konversation (Kleinanzeigen): Daten des letzten Exports (inkl. manueller Werte) -> Bestellung -> Rechnungslayout. */
+        async function createConversationInvoice() {
+            const key = config.adapter.getRecordKey ? config.adapter.getRecordKey() : null;
+            let record = key ? await dbGet('records', key) : null;
+            if (!record || !record.extracted) {
+                toast('ℹ️ Für den Beleg werden zuerst die Chatdaten erkannt (PDF-Export) …', { timeoutMs: 5000 });
+                await run();
+                record = key ? await dbGet('records', key) : null;
+                if (!record || !record.extracted) return;
+            }
+            const merged = mergeRecord({ meta: record.extracted, attributes: record.extractedAttributes || [], description: record.extractedDescription || '' }, record);
+            const fresh = await config.adapter.orderFromMeta(merged.meta, record);
+            if (!fresh) return;
+            const { order } = await saveOrder(fresh);
+            await createInvoice(order.orderId);
         }
 
         async function editOrder(orderId) {
@@ -3206,10 +3406,16 @@
                 inquiry.textContent = '📮 Nachforschung Deutsche Post';
                 inquiry.title = 'Sendung ist nicht als zugestellt bestätigt – Nachforschungsauftrag bei der Deutschen Post stellen';
                 inquiry.style.display = 'none';
-                bar.append(steps, inquiry);
+                const dbBadge = document.createElement('span');
+                dbBadge.className = `${UI_PREFIX}-badge`;
+                bar.append(steps, inquiry, dbBadge);
                 const refreshInvoice = async () => {
                     try {
                         const order = await dbGet('orders', orderId());
+                        const inDb = Boolean(order && order.paid && Object.keys(order.paid).length);
+                        dbBadge.textContent = inDb ? `💾 Im ${purchase ? 'Kaufbericht' : 'Verkaufsbericht'}` : '💾 Nicht gespeichert';
+                        dbBadge.classList.toggle(`${UI_PREFIX}-badge--saved`, inDb);
+                        dbBadge.title = inDb ? `Bestellung mit Beträgen in der lokalen Datenbank (Stand ${new Date(order.updatedAt || Date.now()).toLocaleString('de-DE')})` : 'Bestellung noch nicht in der Datenbank – Seite vollständig laden lassen';
                         if (!order) return;
                         const dates = effectiveDates(order);
                         const stepHtml = [
@@ -3268,6 +3474,8 @@
                 );
             }
             const settingsBtn = mk('⚙️', 'Einstellungen & gespeicherte Felder', icon, () => openSettings());
+            const convInvoiceBtn = config.adapter.orderFromMeta ? mk('🧾 Beleg', 'Rechnung (Verkauf) bzw. Kaufbeleg (Kauf) im Rechnungslayout erstellen', ghost, () => createConversationInvoice()) : null;
+            if (convInvoiceBtn) bar.append(convInvoiceBtn);
             bar.append(mk('🧩', 'Nicht zugeordnete Felder anzeigen', icon, () => openUnmappedFields()), backupButton(), settingsBtn);
             const badge = document.createElement('span');
             badge.className = `${UI_PREFIX}-badge`;
@@ -3285,6 +3493,18 @@
                 const missing = rec && rec.extracted ? missingFieldLabels({ ...rec.extracted, ...(rec.overrides || {}) }) : [];
                 settingsBtn.classList.toggle(`${UI_PREFIX}-btn--attention`, missing.length > 0);
                 settingsBtn.title = missing.length ? `Es fehlen Angaben: ${missing.join(', ')} – hier ergänzen` : 'Einstellungen & gespeicherte Felder';
+                if (convInvoiceBtn) {
+                    const meta = rec && rec.extracted ? { ...rec.extracted, ...(rec.overrides || {}) } : {};
+                    const order = /^\d+$/.test(String(meta.adId || '')) ? await dbGet('orders', String(meta.adId)) : null;
+                    const label = meta.role === 'BUYER' ? 'Kaufbeleg' : 'Rechnung';
+                    const created = order && order.invoiceCreatedAt;
+                    const changed = created && order.invoiceAmounts && (order.role === 'BUYER' ? computePurchaseAmounts(order) : computeOrderAmounts(order)).total !== order.invoiceAmounts.total;
+                    const text = created ? `${label} erstellt am ${new Date(order.invoiceCreatedAt).toLocaleDateString('de-DE')}` : `🧾 ${label}`;
+                    if (convInvoiceBtn.textContent !== text) convInvoiceBtn.textContent = text;
+                    convInvoiceBtn.classList.toggle(`${UI_PREFIX}-btn--attention`, Boolean(changed));
+                    convInvoiceBtn.style.backgroundColor = created && !changed ? '#b5e941' : '';
+                    convInvoiceBtn.style.color = created && !changed ? '#1d4b00' : '';
+                }
             };
             void refreshBadge();
             const timer = setInterval(() => {
@@ -3377,6 +3597,12 @@ ${signature}`;
         normalizeListedShipping,
         kleinanzeigenFieldRules,
         normalizeGermanLocation,
+        formatKleinanzeigenLocation,
+        kleinanzeigenOrderFromMeta,
+        kleinanzeigenAdAge,
+        expiredDataGroups,
+        reviewExpiredKleinanzeigenData,
+        dbDelete,
         mergeKnown,
         mergeArticleValues,
         stripSecrets,
