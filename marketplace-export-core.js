@@ -1,19 +1,19 @@
 /**
  * MarketplaceExportCore – gemeinsame Ablauf-Bibliothek für alle Marktplatz-PDF-Exporter.
- * Version: 4.3.0
+ * Version: 4.4.0
  *
  * Verantwortung: Export-Pipeline, IndexedDB (Overrides je Konversation), Einstellungs-/Feld-Popup,
  * Toasts, HTTP/Bilder, Übersetzung (DeepL -> lokales LLM), Ollama-Client, PDF-Auslieferung.
  * Darstellung macht PdfSharedTheme (pdf-style-*.js), Seiten-Auslesen der jeweilige Adapter.
  *
  * Einbindung (Reihenfolge: pdfmake, vfs_fonts, pdf-lib, [xlsx], pdf-style-core, -article, -chat, [-invoice], Core):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/marketplace-export-core.js?v=4.3.0
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/marketplace-export-core.js?v=4.4.0
  * Benötigte Grants im Userscript: GM_xmlhttpRequest, GM_getValue, GM_setValue, GM_listValues
  */
 (function (global) {
     'use strict';
 
-    const VERSION = '4.3.0';
+    const VERSION = '4.4.0';
     const DB_NAME = 'MarketplacePdfExport';
     const DB_VERSION = 3;
     const UI_PREFIX = 'mpe';
@@ -237,6 +237,17 @@
         const parsed = Theme.parseAnyDateParts(String(raw));
         if (parsed && parsed.hasDate) return `${parsed.year}-${parsed.mm}-${parsed.dd}`;
         return null;
+    }
+
+    /** Freie Datumseingabe („1.1.26“, „2026-01-05“) -> „01.01.2026“; '' bei leer, null bei ungültigem Kalenderdatum. */
+    function normalizeDateInput(raw) {
+        const s = String(raw ?? '').trim();
+        if (!s) return '';
+        const iso = toIsoDate(s);
+        if (!iso) return null;
+        const d = new Date(`${iso}T00:00:00Z`);
+        if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== iso) return null;
+        return iso.split('-').reverse().join('.');
     }
 
     /** Liefert Text + Links eines DOM-Knotens als Runs [{text, link?}] (für klickbare Links im PDF). */
@@ -841,6 +852,42 @@
 
     const attributesToText = (attrs) => (Array.isArray(attrs) ? attrs.map((a) => `${a.name}: ${a.value}`).join('\n') : '');
     const moneyFieldValue = (value) => String(value ?? '').replace(/\s*(?:EUR|€)\s*/gi, ' ').trim();
+
+    /** Kleinanzeigen „Versand (Anzeige)“: Zahl (optional „ab“) bleibt, Kostenlos bleibt, alles andere heißt „Nur Abholung“. */
+    function normalizeListedShipping(raw) {
+        const s = String(raw ?? '').replace(/\s*(?:EUR|€)\s*/gi, ' ').replace(/\s+/g, ' ').trim();
+        if (!s || isNa(s)) return raw ?? '';
+        const m = /^(ab\s*)?(\d+(?:[.,]\d{1,2})?)$/i.exec(s);
+        if (m) return `${m[1] ? 'ab ' : ''}${m[2]} €`;
+        if (/kostenlos|gratis/i.test(s)) return 'Kostenlos';
+        return 'Nur Abholung';
+    }
+
+    const isPickup = (v) => /abhol/i.test(String(v || ''));
+    const isGiveaway = (adType) => /zu verschenken/i.test(String(adType || ''));
+
+    /** Felder, die bei Verschenken bzw. Abholung nicht nötig sind (werden im Formular deaktiviert und nicht als fehlend gemeldet). */
+    function kleinanzeigenFieldRules(v) {
+        const off = [];
+        const withShipping = /mit versand/i.test(String(v.adType || ''));
+        if (isGiveaway(v.adType)) {
+            off.push('listedPrice', 'price', 'buyerProtection', 'paymentMethod', 'returnTrackingId');
+            if (!withShipping) off.push('listedShipping', 'shipping', 'trackingId', 'trackingCarrier');
+        }
+        if ((isPickup(v.listedShipping) && !isNa(v.listedShipping) && !withShipping) || isPickup(v.shipping) || v.paymentMethod === 'Bar bei Abholung') {
+            off.push('buyerProtection', 'trackingId', 'trackingCarrier', 'returnTrackingId');
+        }
+        return Array.from(new Set(off));
+    }
+
+    const GERMAN_STATES = ['Baden-Württemberg', 'Bayern', 'Berlin', 'Brandenburg', 'Bremen', 'Hamburg', 'Hessen', 'Mecklenburg-Vorpommern', 'Niedersachsen', 'Nordrhein-Westfalen', 'Rheinland-Pfalz', 'Saarland', 'Sachsen', 'Sachsen-Anhalt', 'Schleswig-Holstein', 'Thüringen'];
+    /** Kleinanzeigen schreibt „29339 Niedersachsen - Wathlingen“ -> „29339 Wathlingen - Niedersachsen“. */
+    function normalizeGermanLocation(raw) {
+        const s = cleanText(raw);
+        const m = /^(\d{5})\s+(.+?)\s+-\s+(.+)$/.exec(s);
+        if (m && GERMAN_STATES.includes(m[2]) && !GERMAN_STATES.includes(m[3])) return `${m[1]} ${m[3]} - ${m[2]}`;
+        return s;
+    }
     const MONEY_FIELDS = new Set(['listedPrice', 'listedShipping', 'price', 'shipping', 'buyerProtection']);
     const textToAttributes = (txt) => String(txt || '').split(/\r?\n/).map((l) => {
         const i = l.indexOf(':');
@@ -959,11 +1006,62 @@
     }
 
     /**
+     * Datumsfeld: freie Eingabe (z. B. „1.1.26“ -> „01.01.2026“ beim Verlassen) plus Kalender-Knopf (native Auswahl).
+     * get() liefert TT.MM.JJJJ bzw. bei ungültiger Eingabe den Rohtext (Prüfung beim Speichern).
+     */
+    function createDateInput(value, ariaLabel) {
+        const box = document.createElement('span');
+        box.className = `${UI_PREFIX}-date`;
+        box.style.cssText = 'display:flex;gap:4px;align-items:center;position:relative';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.value = value || '';
+        input.placeholder = 'TT.MM.JJJJ';
+        input.autocomplete = 'off';
+        input.style.flex = '1';
+        if (ariaLabel) input.setAttribute('aria-label', ariaLabel);
+        const picker = document.createElement('input');
+        picker.type = 'date';
+        picker.tabIndex = -1;
+        picker.setAttribute('aria-hidden', 'true');
+        picker.style.cssText = 'position:absolute;right:0;bottom:0;width:1px;height:1px;opacity:0;pointer-events:none';
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = '📅';
+        button.title = 'Datum im Kalender wählen';
+        button.setAttribute('aria-label', 'Datum im Kalender wählen');
+        button.style.cssText = 'border:1px solid #d1d5db;background:#fff;border-radius:6px;padding:2px 6px;cursor:pointer;height:28px;min-height:0;min-width:0;line-height:1;flex:0 0 auto';
+        const check = () => {
+            const normalized = normalizeDateInput(input.value);
+            const bad = normalized === null && !isNa(input.value);
+            if (normalized) input.value = normalized;
+            input.style.borderColor = bad ? '#dc2626' : '';
+            input.title = bad ? 'Ungültiges Datum – bitte TT.MM.JJJJ' : '';
+        };
+        input.addEventListener('blur', check);
+        button.addEventListener('click', () => {
+            const iso = toIsoDate(normalizeDateInput(input.value) || '');
+            picker.value = iso || '';
+            if (typeof picker.showPicker === 'function') picker.showPicker();
+            else picker.click();
+        });
+        picker.addEventListener('change', () => {
+            if (picker.value) input.value = picker.value.split('-').reverse().join('.');
+            check();
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        box.append(input, button, picker);
+        return { element: box, input, get: () => normalizeDateInput(input.value) || input.value.trim() };
+    }
+
+    const isDateField = (f) => f.type === 'date' || /\(TT\.MM\.JJJJ\)/.test(f.label || '');
+
+    /**
      * Generisches Formular-Popup.
      * sections: [{ title, hint, fields: [{ key, label, type, options, value, original, wide, hint, missing }] }]
      * buttons:  [{ label, value, primary }]  -> Promise<{ button, values }> bzw. null bei Abbruch
      */
-    function openForm({ title, hint, sections, buttons, validate }) {
+    function openForm({ title, hint, sections, buttons, validate, rules }) {
         return new Promise((resolve) => {
             document.getElementById(`${UI_PREFIX}-modal`)?.remove();
             const overlay = document.createElement('div');
@@ -973,6 +1071,7 @@
             modal.className = `${UI_PREFIX}-modal`;
             modal.innerHTML = `<h3>${escapeHtml(title)}</h3>${hint ? `<p class="${UI_PREFIX}-hint">${escapeHtml(hint)}</p>` : ''}`;
             const inputs = new Map();
+            const wraps = new Map();
 
             for (const sec of sections) {
                 const box = document.createElement('div');
@@ -991,12 +1090,23 @@
                         lab.append(cb, document.createTextNode(f.label));
                         grid.appendChild(lab);
                         inputs.set(f.key, () => cb.checked);
+                        wraps.set(f.key, lab);
                         continue;
                     }
                     const wrap = document.createElement('label');
                     wrap.className = `${UI_PREFIX}-field${f.wide || f.type === 'textarea' ? ` ${UI_PREFIX}-field--wide` : ''}${f.missing ? ` ${UI_PREFIX}-field--missing` : ''}`;
                     wrap.appendChild(document.createTextNode(f.label));
+                    wraps.set(f.key, wrap);
                     let input;
+                    if (isDateField(f)) {
+                        const date = createDateInput(value, f.label);
+                        if (f.original !== undefined && String(f.original) !== String(value)) wrap.classList.add(`${UI_PREFIX}-field--changed`);
+                        if (f.hint) date.input.title = f.hint;
+                        wrap.appendChild(date.element);
+                        grid.appendChild(wrap);
+                        inputs.set(f.key, date.get);
+                        continue;
+                    }
                     if (f.type === 'select') {
                         input = document.createElement('select');
                         const opts = [...(f.options || [])];
@@ -1027,6 +1137,23 @@
                 box.appendChild(grid);
                 modal.appendChild(box);
             }
+
+            // Abhängige Felder (z. B. „Zu verschenken“ -> Preis/Versand) deaktivieren; Werte bleiben erhalten
+            const applyRules = () => {
+                if (!rules) return;
+                const values = {};
+                inputs.forEach((getter, key) => { values[key] = getter(); });
+                const off = new Set(rules(values));
+                wraps.forEach((wrap, key) => {
+                    const disabled = off.has(key);
+                    wrap.querySelectorAll('input,select,textarea,button').forEach((el) => { el.disabled = disabled; });
+                    wrap.style.opacity = disabled ? '0.45' : '';
+                    wrap.title = disabled ? 'Für diese Art der Übergabe nicht nötig' : '';
+                });
+            };
+            modal.addEventListener('input', applyRules);
+            modal.addEventListener('change', applyRules);
+            applyRules();
 
             const bar = document.createElement('div');
             bar.className = `${UI_PREFIX}-buttons`;
@@ -1304,21 +1431,45 @@
     }
 
     /** Genau EINE Auslieferung: Download (Standard), Tab oder beides. */
-    function deliverPdf(bytes, filename, mode = 'download') {
+    function deliverPdf(bytes, filename, mode = 'download', { saveAs = false, onFallback = null } = {}) {
         const file = new File([bytes], filename, { type: 'application/pdf' });
         const url = URL.createObjectURL(file);
-        if (mode === 'download' || mode === 'both') {
+        const anchorDownload = () => {
             const a = document.createElement('a');
             a.href = url;
             a.download = filename;
             document.body.appendChild(a);
             a.click();
             a.remove();
+        };
+        if (mode === 'download' || mode === 'both') {
+            // Nur Belege fragen nach dem Ort (Tampermonkey-Download); alle anderen Firefox-Downloads bleiben unverändert.
+            if (saveAs && typeof GM_download === 'function') {
+                GM_download({
+                    url, name: filename, saveAs: true,
+                    onerror: (err) => {
+                        anchorDownload();
+                        if (onFallback) onFallback(err && (err.error || err.details) ? `${err.error || ''} ${err.details || ''}`.trim() : 'unbekannter Fehler');
+                    }
+                });
+            } else {
+                anchorDownload();
+                if (saveAs && onFallback) onFallback('GM_download ist nicht freigegeben');
+            }
         }
         if (mode === 'open' || mode === 'both') window.open(url, '_blank');
         // shortcut: Blob-URL lebt 10 min (Links im Toast danach tot), bei Bedarf Bytes im Toast halten
         setTimeout(() => URL.revokeObjectURL(url), 10 * 60 * 1000);
         return url;
+    }
+
+    /** Ordnervorschlag für Belege: Verkäufe nach Jahr/Plattform, Käufe nach Jahr. */
+    function invoiceFolderHint(order, brand) {
+        const year = String(order.paidDate || order.soldDate || '').slice(0, 4) || '<Jahr unbekannt>';
+        const platform = { ebay: 'Ebay', kleinanzeigen: 'Kleinanzeigen', vinted: 'Vinted', nebenan: 'nebenan.de' }[String(order.platform || brand || '').toLowerCase()] || brand;
+        return order.role === 'BUYER'
+            ? `%OneDrive%\\Dokumente\\Rechnungen\\${year}`
+            : `%OneDrive%\\Dokumente\\Rechnungen\\${year} Verkäufe und Einnahmen\\${platform}`;
     }
 
     /* ==========================================================================
@@ -1381,7 +1532,7 @@
     ];
     const PURCHASE_FIELDS = [['itemsTotal', 'Artikelpreis'], ['total', 'Gesamtbetrag vor Erstattung'], ['refund', 'Erstattungsbetrag']];
     const ACQUISITION_FIELDS = [
-        { key: 'acquiredAt', label: 'Erworben am (TT.MM.JJJJ)' },
+        { key: 'acquiredAt', label: 'Erworben am (TT.MM.JJJJ)', type: 'date' },
         { key: 'acquiredFrom', label: 'Erworben von', type: 'select', options: [['', '–'], ['Privatkauf', 'Privatkauf'], ['Gewerblicher Kauf', 'Gewerblicher Kauf']] },
         { key: 'acquisitionPrice', label: 'Anschaffungspreis (EUR)' },
         { key: 'originalInvoiceNumber', label: 'Originale Rechnungsnummer (Erwerb)' },
@@ -1423,14 +1574,14 @@
             next.shippingActual = { cents: next.overrides.shippingActual, carrier: '', product: 'manuell', source: 'manual' };
             delete next.overrides.shippingActual;
         }
+        const dateIso = (key, label) => {
+            if (!Object.prototype.hasOwnProperty.call(values, key)) return undefined;
+            const normalized = normalizeDateInput(values[key]);
+            if (normalized === null) throw new Error(`${label} ist ungültig. Bitte TT.MM.JJJJ verwenden.`);
+            return normalized ? toIsoDate(normalized) : '';
+        };
         if (buyer && Object.prototype.hasOwnProperty.call(values, 'sellerName')) {
-            const paidDate = values.paidDate ? toIsoDate(values.paidDate) : '';
-            if (values.paidDate) {
-                const parsed = new Date(`${paidDate}T00:00:00Z`);
-                if (!/^\d{2}\.\d{2}\.\d{4}$/.test(values.paidDate) || !paidDate || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== paidDate) {
-                    throw new Error('Das Bezahldatum ist ungültig. Bitte TT.MM.JJJJ verwenden.');
-                }
-            }
+            const paidDate = dateIso('paidDate', 'Das Bezahldatum');
             const itemTitles = {};
             (order.items || []).forEach((item, index) => {
                 const title = values[`itemTitle${index}`];
@@ -1450,15 +1601,37 @@
             const amounts = computePurchaseAmounts({ ...next, purchaseEdits: { ...next.purchaseEdits, fullRefund: false } });
             if (amounts.refund > amounts.grossTotal) throw new Error('Der Erstattungsbetrag darf den ursprünglichen Gesamtbetrag nicht übersteigen.');
         } else {
+            const acquiredAt = dateIso('acquiredAt', 'Das Erwerbsdatum');
             next.acquisition = {
-                date: toIsoDate(values.acquiredAt) || '',
+                date: acquiredAt ?? order.acquisition?.date ?? '',
                 from: values.acquiredFrom || '',
                 priceCents: toCents(values.acquisitionPrice, true),
                 originalInvoiceNumber: values.originalInvoiceNumber ?? order.acquisition?.originalInvoiceNumber ?? '',
                 reason: values.saleReason || ''
             };
         }
+        const shipped = dateIso('shippedDate', 'Das Versanddatum');
+        const delivered = dateIso('deliveredDate', 'Das Zustelldatum');
+        if (shipped !== undefined || delivered !== undefined) {
+            const manualDates = { ...(order.manualDates || {}) };
+            if (shipped !== undefined) manualDates.shippedDate = shipped && shipped !== order.shippedDate ? shipped : '';
+            if (delivered !== undefined) manualDates.deliveredDate = delivered && delivered !== order.deliveredDate ? delivered : '';
+            next.manualDates = manualDates;
+        }
+        const manual = (o) => JSON.stringify([o.overrides || {}, o.purchaseEdits || null, o.acquisition || null, o.manualDates || null, o.shippingActual?.source === 'manual' ? o.shippingActual : null]);
+        if (manual(next) !== manual(order)) next.editedAt = new Date().toISOString();
         return next;
+    }
+
+    /** Versand-/Zustelldatum: Seitenwert hat Vorrang, sonst manuell eingetragenes Datum (gekennzeichnet). */
+    function effectiveDates(order) {
+        const m = order.manualDates || {};
+        return {
+            shippedDate: order.shippedDate || m.shippedDate || '',
+            deliveredDate: order.deliveredDate || m.deliveredDate || '',
+            shippedManual: !order.shippedDate && Boolean(m.shippedDate),
+            deliveredManual: !order.deliveredDate && Boolean(m.deliveredDate)
+        };
     }
 
     function effectivePurchaseOrder(order) {
@@ -1507,24 +1680,24 @@
     const RATE_CARRIERS = ['Deutsche Post', 'DHL', 'Hermes', 'DPD', 'GLS', 'UPS'];
 
     // Startwerte der Versandkosten-Tabelle (Privatkunden, Online-Frankierung); Quellen siehe plan.md "Versandkosten".
-    // Kompakt: [Tarif, [gültig ab, Cent], …] – nur echte Preisänderungen.
+    // Kompakt: [Tarif, [gültig ab, Cent], …] – nur echte Preisänderungen. 2027: Genehmigung der Bundesnetzagentur stand am 19.11.2026 noch aus.
     const RATE_SEED = {
         'Deutsche Post': [
-            ['Kompaktbrief (50 g)', ['2024-01-01', 100], ['2025-01-01', 110]],
-            ['Großbrief (500 g)', ['2024-01-01', 160], ['2025-01-01', 180]],
-            ['Maxibrief (1 kg)', ['2024-01-01', 275], ['2025-01-01', 290]],
-            ['Maxibrief bis 2 kg', ['2024-01-01', 495], ['2025-01-01', 510]],
+            ['Kompaktbrief (50 g)', ['2024-01-01', 100], ['2025-01-01', 110], ['2027-01-01', 125]],
+            ['Großbrief (500 g)', ['2024-01-01', 160], ['2025-01-01', 180], ['2027-01-01', 235]],
+            ['Maxibrief (1 kg)', ['2024-01-01', 275], ['2025-01-01', 290], ['2027-01-01', 500]],
+            ['Maxibrief bis 2 kg', ['2024-01-01', 495], ['2025-01-01', 510], ['2027-01-01', 500]],
             ['Warensendung (1 kg)', ['2024-01-01', 255], ['2025-07-01', 270]],
             ['Warensendung bis 2 kg', ['2024-07-01', 340], ['2025-07-01', 355]]
         ],
         DHL: [
-            ['Päckchen S (2 kg)', ['2024-01-01', 399], ['2025-01-01', 419]],
+            ['Päckchen S (2 kg)', ['2024-01-01', 399], ['2025-01-01', 419], ['2027-01-01', 449]],
             ['Päckchen M (2 kg)', ['2024-01-01', 479], ['2025-01-01', 519]],
             ['Paket 2 kg (online)', ['2024-01-01', 549], ['2025-01-01', 619]],
             ['Paket 5 kg', ['2024-01-01', 699], ['2025-01-01', 769]],
-            ['Paket 10 kg', ['2024-01-01', 1049]],
-            ['Paket 20 kg', ['2024-07-12', 1899]],
-            ['Paket 31,5 kg', ['2024-01-01', 1999], ['2024-07-12', 2399]]
+            ['Paket 10 kg', ['2024-01-01', 1049], ['2027-01-01', 1149]],
+            ['Paket 20 kg', ['2024-07-12', 1899], ['2027-01-01', 1999]],
+            ['Paket 31,5 kg', ['2024-01-01', 1999], ['2024-07-12', 2399], ['2027-01-01', 2499]]
         ],
         Hermes: [
             ['Päckchen (Shop→Shop)', ['2024-01-01', 370]],
@@ -1563,6 +1736,22 @@
         const rec = await dbGet('config', 'shippingRates');
         const carriers = rec ? rec.carriers : JSON.parse(JSON.stringify(DEFAULT_SHIPPING_RATES));
         for (const c of RATE_CARRIERS) if (!carriers[c]) carriers[c] = [];
+        if (rec) mergeSeedRates(carriers);
+        return carriers;
+    }
+
+    /** Neue Startpreise (z. B. 2027) in eine gespeicherte Tabelle übernehmen; vorhandene Einträge und eigene Tarife bleiben unverändert. */
+    function mergeSeedRates(carriers) {
+        for (const [carrier, products] of Object.entries(DEFAULT_SHIPPING_RATES)) {
+            for (const seed of products) {
+                const own = (carriers[carrier] || []).find((p) => p.product === seed.product);
+                if (!own) continue;
+                own.prices = own.prices || [];
+                for (const price of seed.prices) {
+                    if (!own.prices.some((p) => p.validFrom === price.validFrom)) own.prices.push({ ...price });
+                }
+            }
+        }
         return carriers;
     }
 
@@ -1751,6 +1940,18 @@
                 tr.appendChild(info);
                 const vals = {};
                 for (const c of columns) {
+                    const td = document.createElement('td');
+                    if (isDateField(c)) {
+                        const date = createDateInput(r.values[c.key] ?? '', `${c.label} ${r.id}`);
+                        const markDate = () => date.input.classList.toggle(`${UI_PREFIX}-changed`, Boolean(r.originals) && c.key in r.originals && String(r.originals[c.key]) !== date.get());
+                        date.input.addEventListener('input', markDate);
+                        date.input.addEventListener('blur', markDate);
+                        markDate();
+                        vals[c.key] = date.get;
+                        td.appendChild(date.element);
+                        tr.appendChild(td);
+                        continue;
+                    }
                     const input = document.createElement(c.type === 'select' ? 'select' : 'input');
                     for (const [v, l] of c.options || []) input.add(new Option(l, v));
                     input.value = r.values[c.key] ?? '';
@@ -1760,7 +1961,6 @@
                     input.addEventListener('change', mark);
                     mark();
                     vals[c.key] = () => input.value.trim();
-                    const td = document.createElement('td');
                     td.appendChild(input);
                     tr.appendChild(td);
                 }
@@ -1811,7 +2011,7 @@
         if (!purchase) fields.push({ key: 'shippingProduct', label: `Versandtarif zum ${dateDe(date)} (setzt „Versandkosten“)`, type: 'select', options, value: '', wide: true });
         const answer = await openForm({
             title: `✏️ Bestellung ${order.orderId} – Beträge & Erwerb`,
-            hint: [reason, `Versandservice laut Bestellung: ${order.shippingService || 'n/a'}. Beträge in EUR, orange = manuell geändert.`, purchase ? 'Bei Erstattung den ursprünglichen Gesamtbetrag vor Erstattung prüfen und gegebenenfalls korrigieren.' : ''].filter(Boolean).join(' · '),
+            hint: [reason, `Versandservice laut Bestellung: ${order.shippingService || 'n/a'}. Beträge in EUR, orange = manuell geändert.`, purchase ? 'Erstattungen laut eBay-Käuferseite werden automatisch übernommen; hier nur Abweichungen eintragen.' : '', order.editedAt ? `Zuletzt manuell angepasst am ${new Date(order.editedAt).toLocaleString('de-DE', { dateStyle: 'medium', timeStyle: 'short' })}.` : 'Noch nicht manuell angepasst.'].filter(Boolean).join(' · '),
             sections: [
                 { title: 'Beträge (werden in der Datenbank gespeichert)', fields },
                 ...(purchase ? [{
@@ -1826,7 +2026,14 @@
                         { key: 'fullRefund', label: 'Vollständig erstattet / Rückgabe (Gesamtbetrag 0 EUR)', type: 'checkbox', value: order.purchaseEdits?.fullRefund }
                     ]
                 }] : []),
-                ...(!purchase ? [{ title: 'Erwerb (Verkaufsbericht: Haltedauer, Anschaffungspreis, Ertrag)', fields: ACQUISITION_FIELDS.map((f) => ({ ...f, value: cur[f.key] })) }] : [])
+                ...(!purchase ? [{
+                    title: 'Versand & Zustellung (leer = Wert der eBay-Seite)',
+                    hint: 'Fehlt die Zustellung (z. B. Sendungsverfolgung der Post defekt), hier ein Datum eintragen – auf der Rechnung steht dann „manuell eingetragen“.',
+                    fields: [
+                        { key: 'shippedDate', label: 'Versand am (TT.MM.JJJJ)', type: 'date', value: dateDe(effectiveDates(order).shippedDate), original: dateDe(order.shippedDate) },
+                        { key: 'deliveredDate', label: 'Zugestellt am (TT.MM.JJJJ)', type: 'date', value: dateDe(effectiveDates(order).deliveredDate), original: dateDe(order.deliveredDate) }
+                    ]
+                }, { title: 'Erwerb (Verkaufsbericht: Haltedauer, Anschaffungspreis, Ertrag)', fields: ACQUISITION_FIELDS.map((f) => ({ ...f, value: cur[f.key] })) }] : [])
             ],
             buttons: [{ label: 'Abbrechen', value: null }, { label: 'Manuelle Beträge löschen', value: 'reset' }, { label: 'Speichern', value: 'save', primary: true }],
             validate: (button, values) => { if (button === 'save') applyOrderEdits(order, values); }
@@ -1840,6 +2047,33 @@
             next = { ...order, overrides: {} };
             if (order.shippingActual && order.shippingActual.source === 'manual') next.shippingActual = null;
         }
+        await dbPut('orders', next);
+        return next;
+    }
+
+    const POST_INQUIRY_URL = 'https://www.deutschepost.de/de/hilfe-kundenservice/formulare/zustellung.html';
+    const isPostShipment = (order) => detectCarrier(order.trackingId, order.shippingService) === 'Deutsche Post' || carrierFromService(order.shippingService) === 'Deutsche Post';
+
+    /** Verkauf ohne bestätigte Zustellung: Zustelldatum eintragen oder bewusst ohne erstellen. null = Abbruch. */
+    async function confirmDelivery(order) {
+        if (effectiveDates(order).deliveredDate) return order;
+        const answer = await openForm({
+            title: `📦 Bestellung ${order.orderId} ist nicht als zugestellt bestätigt`,
+            hint: `Zustelldatum eintragen (auf der Rechnung als „manuell eingetragen“ gekennzeichnet) oder die Rechnung trotzdem ohne Zustelldatum erstellen.${isPostShipment(order) ? ` Deutsche-Post-Nachforschung: ${POST_INQUIRY_URL}` : ''}`,
+            sections: [{ title: 'Zustellung', fields: [{ key: 'deliveredDate', label: 'Zugestellt am (TT.MM.JJJJ)', type: 'date', value: '' }] }],
+            buttons: [{ label: 'Abbrechen', value: null }, { label: 'Ja, ohne Zustelldatum erstellen', value: 'force' }, { label: 'Datum speichern und erstellen', value: 'save', primary: true }],
+            validate: (button, values) => {
+                if (button !== 'save') return;
+                if (!normalizeDateInput(values.deliveredDate)) throw new Error('Bitte ein gültiges Zustelldatum (TT.MM.JJJJ) eintragen.');
+            }
+        });
+        if (!answer) return null;
+        if (answer.button !== 'save') return order;
+        const next = {
+            ...order,
+            manualDates: { ...(order.manualDates || {}), deliveredDate: toIsoDate(normalizeDateInput(answer.values.deliveredDate)) },
+            editedAt: new Date().toISOString()
+        };
         await dbPut('orders', next);
         return next;
     }
@@ -1863,6 +2097,7 @@
         const sa = order.shippingActual;
         const s = ctx.settings;
         const carrier = detectCarrier(order.trackingId, order.shippingService);
+        const dates = effectiveDates(order);
         return {
             platform: ctx.platform,
             brand: ctx.brand,
@@ -1888,8 +2123,8 @@
                 shippingCarrier: order.shippingCarrier,
                 trackingId: order.trackingId,
                 trackingUrl: order.trackingId && CARRIER_TRACKING_URLS[carrier] ? CARRIER_TRACKING_URLS[carrier](order.trackingId) : '',
-                shippedDate: dateDe(order.shippedDate),
-                deliveredDate: dateDe(order.deliveredDate)
+                shippedDate: dateDe(dates.shippedDate) + (dates.shippedManual ? ' (manuell eingetragen)' : ''),
+                deliveredDate: dates.deliveredDate ? dateDe(dates.deliveredDate) + (dates.deliveredManual ? ' (manuell eingetragen)' : '') : (purchase ? '' : 'nicht bestätigt')
             },
             items: (order.items || []).map((i) => ({ ...i, itemUrl: ctx.itemUrl ? ctx.itemUrl(i.itemId) : '' })),
             amounts: a,
@@ -2047,6 +2282,7 @@
         { key: 'ollamaModel', label: 'Ollama-Modell' },
         { key: 'ollamaVisionModel', label: 'Ollama-Vision-Modell für Sendungsnummern in Bildern (leer = nur Tesseract.js)' },
         { key: 'deliveryMode', label: 'Nach dem Erstellen', type: 'select', options: [['download', 'Nur herunterladen'], ['open', 'Nur im Tab öffnen'], ['both', 'Herunterladen und öffnen']] },
+        { key: 'invoiceSaveAs', label: 'Rechnungen/Kaufbelege: „Speichern unter“ fragen (nur diese Dateien; Tampermonkey: Download-Modus „Browser-API“, .pdf in der Whitelist)', type: 'checkbox' },
         { key: 'useLlm', label: 'Lokales LLM (Ollama) als Fallback/Analyse nutzen', type: 'checkbox' },
         { key: 'attachOriginals', label: 'Originalbilder als PDF-Anhang einbetten', type: 'checkbox' },
         { key: 'reviewBeforeExport', label: 'Vor jedem Export das Feld-Popup zeigen', type: 'checkbox' }
@@ -2059,6 +2295,7 @@
         ollamaModel: 'qwen2.5:7b',
         ollamaVisionModel: 'qwen3-vl:8b',
         deliveryMode: 'download',
+        invoiceSaveAs: false,
         useLlm: true,
         attachOriginals: true,
         reviewBeforeExport: false
@@ -2077,9 +2314,13 @@
         const store = createSettingsStore(config.settingsKey, { ...COMMON_DEFAULTS, ...(config.defaults || {}) });
         const caps = config.capabilities || {};
         const scriptLabel = `${config.scriptName} v${config.scriptVersion} (Tampermonkey, Bibliotheken v${VERSION})`;
-        const localFieldDefs = LOCAL_FIELDS.filter((f) => !f.cap || caps[f.cap]);
+        const localFieldDefs = LOCAL_FIELDS.filter((f) => !f.cap || caps[f.cap]).map((f) => ({ ...f, ...((config.fieldOverrides || {})[f.key] || {}) }));
+        const disabledFields = (values) => new Set(config.fieldRules ? config.fieldRules(values) : []);
         // Angaben, deren Fehlen gemeldet wird (Warnung nach dem Export, oranger ⚙️-Knopf)
-        const missingFieldLabels = (meta) => localFieldDefs.filter((f) => ['adType', 'category', 'createdAt', 'sellerType', 'sellerActiveSince', 'listedPrice'].includes(f.key) && isNa(meta[f.key])).map((f) => f.label);
+        const missingFieldLabels = (meta) => {
+            const off = disabledFields(meta);
+            return localFieldDefs.filter((f) => ['adType', 'category', 'createdAt', 'sellerType', 'sellerActiveSince', 'listedPrice'].includes(f.key) && !off.has(f.key) && isNa(meta[f.key])).map((f) => f.label);
+        };
         const globalFieldDefs = [...(config.globalFields || []), ...COMMON_GLOBAL_FIELDS];
         let busy = false;
 
@@ -2134,7 +2375,7 @@
             buttons.push({ label: 'Speichern', value: 'save', primary: mode !== 'export' });
             if (mode === 'export') buttons.push({ label: 'Speichern & PDF erstellen', value: 'export', primary: true });
 
-            const answer = await openForm({ title: `⚙️ ${config.scriptName} – Einstellungen & Felder (v${config.scriptVersion})`, sections, buttons });
+            const answer = await openForm({ title: `⚙️ ${config.scriptName} – Einstellungen & Felder (v${config.scriptVersion})`, sections, buttons, rules: config.fieldRules });
             if (!answer) return null;
             const nextSettings = { ...settings };
             for (const f of globalFieldDefs) if (answer.values[f.key] !== undefined) nextSettings[f.key] = answer.values[f.key];
@@ -2647,6 +2888,8 @@
             try {
                 let order = await loadOrder(orderId);
                 if (!order) return;
+                if (order.role !== 'BUYER') order = await confirmDelivery(order);
+                if (!order) return;
                 if (order.role !== 'BUYER') order = await ensureShippingActual(order);
                 if (!order) return;
                 const model = buildOrderDocumentModel(order, docCtx());
@@ -2658,12 +2901,20 @@
                 // Rechnungsdatum = Zahldatum (wie im Dokument)
                 const documentLabel = model.purchase ? 'Kaufbeleg' : 'Rechnung';
                 const filename = `${effective.paidDate || effective.soldDate || formatDateIso()} ${sanitizeFilename(brand)} ${documentLabel} ${order.orderId} ${title}.pdf`;
-                const url = deliverPdf(bytes, filename, store.get().deliveryMode);
+                const settings = store.get();
+                const folder = invoiceFolderHint(effective, brand);
+                const url = deliverPdf(bytes, filename, settings.deliveryMode, {
+                    saveAs: Boolean(settings.invoiceSaveAs),
+                    onFallback: (reason) => toast(`⚠️ „Speichern unter“ nicht möglich (${reason}) – normal heruntergeladen. Tampermonkey: @grant GM_download, Download-Modus „Browser-API“, .pdf in der Whitelist.`, { type: 'warn', sticky: true })
+                });
                 await dbPut('orders', { ...order, invoiceCreatedAt: new Date().toISOString(), invoiceAmounts: model.amounts });
                 toast(`🧾 ${documentLabel} erstellt: ${filename}`, {
                     type: 'success',
                     sticky: true,
-                    list: model.purchase ? [`Gesamtbetrag: ${eur(model.amounts.total)}`] : [`Gesamtbetrag (Erlös): ${eur(model.amounts.total)}`, `Versandkosten: ${eur(model.amounts.shippingActual)}${model.shippingActualLabel ? ` (${model.shippingActualLabel})` : ''}`],
+                    list: [
+                        ...(model.purchase ? [`Gesamtbetrag: ${eur(model.amounts.total)}`] : [`Gesamtbetrag (Erlös): ${eur(model.amounts.total)}`, `Versandkosten: ${eur(model.amounts.shippingActual)}${model.shippingActualLabel ? ` (${model.shippingActualLabel})` : ''}`]),
+                        `Ablage: ${folder}`
+                    ],
                     actions: [
                         { label: '📂 Im Tab öffnen', href: url },
                         { label: '✏️ Werte ändern & neu erstellen', onClick: async () => { if (await openOrderEditor(order)) await createInvoice(order.orderId); } }
@@ -2944,10 +3195,31 @@
                     backupButton(),
                     mk('⚙️', 'Einstellungen', icon, () => openSettings())
                 );
+                const steps = document.createElement('span');
+                steps.className = `${UI_PREFIX}-steps`;
+                steps.style.cssText = 'display:inline-flex;gap:6px;flex-wrap:wrap;font-size:12px;margin-left:6px';
+                const inquiry = document.createElement('a');
+                inquiry.href = POST_INQUIRY_URL;
+                inquiry.target = '_blank';
+                inquiry.rel = 'noopener';
+                inquiry.className = `${UI_PREFIX}-btn ${ghost}`;
+                inquiry.textContent = '📮 Nachforschung Deutsche Post';
+                inquiry.title = 'Sendung ist nicht als zugestellt bestätigt – Nachforschungsauftrag bei der Deutschen Post stellen';
+                inquiry.style.display = 'none';
+                bar.append(steps, inquiry);
                 const refreshInvoice = async () => {
                     try {
                         const order = await dbGet('orders', orderId());
                         if (!order) return;
+                        const dates = effectiveDates(order);
+                        const stepHtml = [
+                            [purchase ? 'Gekauft' : 'Verkauft', order.soldDate, false],
+                            ['Bezahlt', order.paidDate, false],
+                            ['Versandt', dates.shippedDate, dates.shippedManual],
+                            ['Zugestellt', dates.deliveredDate, dates.deliveredManual]
+                        ].map(([label, iso, manual]) => `<span title="${iso ? (manual ? 'manuell eingetragen' : 'laut eBay') : 'noch offen'}" style="padding:2px 8px;border-radius:999px;border:1px solid ${iso ? '#16a34a' : '#d1d5db'};background:${iso ? '#dcfce7' : '#f9fafb'};color:${iso ? '#14532d' : '#6b7280'}">${iso ? '✓' : '○'} ${label}${iso ? ` ${dateDe(iso)}` : ''}${manual ? ' (manuell)' : ''}</span>`).join('');
+                        if (steps.dataset.html !== stepHtml) { steps.innerHTML = stepHtml; steps.dataset.html = stepHtml; }
+                        inquiry.style.display = purchase || Boolean(order.deliveredDate) || !isPostShipment(order) ? 'none' : '';
                         const amounts = purchase ? computePurchaseAmounts(order) : computeOrderAmounts(order);
                         const changed = Boolean(order.invoiceCreatedAt && order.invoiceAmounts &&
                             amounts.total !== order.invoiceAmounts.total);
@@ -3040,6 +3312,44 @@
         return api;
     }
 
+    /** Nachname = letztes Wort des Namens (ohne abgekürzte Initialen wie „J.“). */
+    function lastNameOf(fullName) {
+        const words = cleanText(fullName).split(/\s+/).filter((w) => w && !/^[A-ZÄÖÜ]\.$/.test(w));
+        return words.length > 1 ? words[words.length - 1] : '';
+    }
+
+    /**
+     * Bewertungsbitte an Käufer. lang 'de'|'en', gender 'm'|'f'|'' (unbekannt -> neutrale Anrede mit vollem Namen).
+     * Texte vom Nutzer vorgegeben (Liste 18.11.2026).
+     */
+    function buildFeedbackRequest({ lang = 'de', gender = '', lastName = '', fullName = '', signature = '' }) {
+        const name = lastName || fullName;
+        if (lang === 'en') {
+            const salutation = gender === 'm' && lastName ? `Dear Mr ${lastName},` : gender === 'f' && lastName ? `Dear Ms ${lastName},` : `Dear ${fullName || name || 'Sir or Madam'},`;
+            return `${salutation}
+
+I hope the item has arrived safely and you are satisfied. As a small seller, I rely on your feedback – a positive overall rating (5 stars) would be greatly appreciated.
+
+Important: The detailed rating stars (shipping cost, delivery time) are optional and do not need to be filled out. I cannot influence delivery times or shipping costs – only the item description and communication are within my control.
+
+If there are any issues, please contact me directly so we can find a solution. Thank you in advance!
+
+Best regards,
+${signature}`;
+        }
+        const salutation = gender === 'm' && lastName ? `Sehr geehrter Herr ${lastName},` : gender === 'f' && lastName ? `Sehr geehrte Frau ${lastName},` : `Guten Tag ${fullName || name},`.replace(' ,', ',');
+        return `${salutation}
+
+ich hoffe, der Artikel ist gut bei Ihnen angekommen und Sie sind zufrieden. Als kleiner Verkäufer bin ich auf Ihre Bewertung angewiesen – eine positive Hauptbewertung (5 Sterne) würde mich sehr freuen.
+
+Wichtig: Die „Details bewerten“-Sterne (Versandkosten, Lieferzeit) sind optional und müssen nicht ausgefüllt werden. Ich kann weder Lieferzeiten noch Versandkosten beeinflussen – maßgeblich nur Artikelbeschreibung und Kommunikation.
+
+Falls es Probleme gibt, melden Sie sich bitte direkt bei mir, damit wir eine Lösung finden können. Vielen Dank im Voraus!
+
+Mit freundlichem Gruß
+${signature}`;
+    }
+
     global.MarketplaceExportCore = Object.freeze({
         VERSION,
         sleep,
@@ -3047,6 +3357,11 @@
         cleanText,
         sanitizeFilename,
         toIsoDate,
+        normalizeDateInput,
+        openForm,
+        effectiveDates,
+        lastNameOf,
+        buildFeedbackRequest,
         extractRuns,
         looksGerman,
         gmRequest,
@@ -3059,6 +3374,9 @@
         rememberContact,
         getContacts,
         moneyFieldValue,
+        normalizeListedShipping,
+        kleinanzeigenFieldRules,
+        normalizeGermanLocation,
         mergeKnown,
         mergeArticleValues,
         stripSecrets,
@@ -3077,6 +3395,8 @@
         holdingPeriod,
         saveOrder,
         priceAt,
+        mergeSeedRates,
+        DEFAULT_SHIPPING_RATES,
         carrierFromService,
         suggestShippingActual,
         ensureShippingActual,

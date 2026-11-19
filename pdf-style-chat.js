@@ -1,11 +1,11 @@
 /**
  * PdfSharedTheme – Nachrichten-Stylesheet: Chat-Meta, Bubbles, Preisvorschläge, Systemnachrichten, Chat-PDF.
- * Version: 4.3.0
+ * Version: 4.4.0
  *
  * buildExportDocument setzt Nachrichtenverlauf + Artikelseite zusammen; setzt pdf-style-core.js und pdf-style-article.js voraus.
  *
  * Einbindung (Reihenfolge: core, article, chat, invoice; Versions-Parameter erzwingt Neuladen aus dem Tampermonkey-Cache):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-chat.js?v=4.3.0
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-chat.js?v=4.4.0
  */
 (function (global) {
     'use strict';
@@ -67,7 +67,8 @@
         const layoutFor = (vals) => {
             const own = vals.filter((v) => v !== null);
             if (!own.some((v) => parseMoney(v).cents !== null)) return { ...layout, prefixW: 0, amountW: 0 };
-            return { ...layout, numStart: Math.max(0, layout.amountW - moneyLayout(own).numW) };
+            // Messung mit der gemeinsamen Nachkommastellen-Regel, sonst rückt „inkl. Versand“ ein (Rückmeldung 19.11.2026)
+            return { ...layout, numStart: Math.max(0, layout.amountW - moneyLayout(own, layout.decimals).numW) };
         };
         const leftLayout = layoutFor(leftValues);
         const rightLayout = layoutFor(rightValues);

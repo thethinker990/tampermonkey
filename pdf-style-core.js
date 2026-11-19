@@ -1,18 +1,18 @@
 /**
  * PdfSharedTheme – Core-Stylesheet (pdfmake) für alle Marktplatz-PDFs: Tokens, Schriften, Emojis, Datum, Geld, Links, Tabellen, Galerie, Fußzeile.
- * Version: 4.3.0
+ * Version: 4.4.0
  *
  * Wird von pdf-style-article.js (Artikel), pdf-style-chat.js (Nachrichten) und pdf-style-invoice.js (Rechnung, Berichte) genutzt.
  * Öffentliche Funktionen hängen an window.PdfSharedTheme, gemeinsame Bausteine für die anderen Stylesheets an window.PdfSharedTheme._ .
  * Ablauf/DB/Settings/Toast liegen in marketplace-export-core.js; Datenmodell siehe specs/001-marketplace-pdf-export/plan.md.
  *
  * Einbindung (Reihenfolge: core, article, chat, invoice; Versions-Parameter erzwingt Neuladen aus dem Tampermonkey-Cache):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-core.js?v=4.3.0
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-core.js?v=4.4.0
  */
 (function (global) {
     'use strict';
 
-    const LIB_VERSION = '4.3.0';
+    const LIB_VERSION = '4.4.0';
 
     const MONTH_SHORT_DE = Object.freeze([
         'Jan.', 'Feb.', 'Mär.', 'Apr.', 'Mai', 'Jun.',
@@ -950,7 +950,7 @@
         }
         if (cents === null) {
             if (/kostenlos|gratis|free/i.test(s)) return { special: 'Kostenlos', cents: 0, prefix: '' };
-            if (/abhol/i.test(s)) return { special: 'Abholung', cents: 0, prefix: '' };
+            if (/abhol/i.test(s)) return { special: /nur\s+abhol/i.test(s) ? 'Nur Abholung' : 'Abholung', cents: 0, prefix: '' };
             if (/inkl/i.test(s)) return { special: 'inkl. Versand', cents: 0, prefix: '' };
             return { special: s, cents: null, prefix: '' };
         }
@@ -979,9 +979,9 @@
     }
 
     /** Gemeinsame Spaltenbreiten einer Betragsgruppe, damit Präfix, Betrag und "EUR" untereinander stehen. */
-    function moneyLayout(values) {
+    function moneyLayout(values, forceDecimals) {
         const fs = TOKENS.typography.tableFontSize;
-        const decimals = moneyGroupNeedsDecimals(values);
+        const decimals = forceDecimals ?? moneyGroupNeedsDecimals(values);
         let prefixW = 0;
         let amountW = 0;
         let numW = 0;
