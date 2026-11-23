@@ -1,11 +1,11 @@
 /**
  * PdfSharedTheme – Rechnungs-Stylesheet: Rechnung (DIN 5008 Form B, hochkant), Verkaufs- und Kaufbericht (quer).
- * Version: 4.5.0
+ * Version: 4.7.1
  *
  * Geschäftsdokumente ohne Chat-Bausteine; setzt pdf-style-core.js voraus.
  *
  * Einbindung (Reihenfolge: core, article, chat, invoice; Versions-Parameter erzwingt Neuladen aus dem Tampermonkey-Cache):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-invoice.js?v=4.5.0
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-invoice.js?v=4.7.1
  */
 (function (global) {
     'use strict';
@@ -160,7 +160,8 @@
         const neg = (c) => (c === null || c === undefined ? null : -Math.abs(c));
         const sumRows = (inv.purchase ? [
             ['Artikelpreis gesamt', a.itemsTotal],
-            ['Versand / Gebühren (Differenz)', a.fees],
+            ['Versandkosten', a.shipping],
+            ...(a.fees ? [[a.fees < 0 ? 'Rabatt' : 'Gebühren', a.fees]] : []),
             ...(a.refund ? [['Rückerstattung', neg(a.refund)]] : []),
             ['Gesamtbetrag', a.total, true]
         ] : [
@@ -183,7 +184,16 @@
             { columns: [{ width: '*', stack: [smallLabel(o.idLabel ? 'Anzeige' : 'Bestellung'), orderTable] }, { width: '*', stack: [smallLabel('Versand'), shippingTable] }], columnGap: 18, margin: [0, 0, 0, 12] },
             { table: { headerRows: 1, widths: [...(withImages ? [40] : []), '*', 50, 65, 80], body: [head, ...itemRows] }, layout: thinTable, fontSize: 9 },
             { columns: [{ width: '*', text: '' }, { width: 270, table: { widths: ['*', 80], body: sumRows }, layout: thinTable, fontSize: 9 }], margin: [0, 12, 0, 0] },
-            inv.note ? { text: inv.note, fontSize: 8.5, color: muted, margin: [0, 16, 0, 0] } : null
+            inv.note ? { text: inv.note, fontSize: 8.5, color: muted, margin: [0, 16, 0, 0] } : null,
+            inv.receiptPhoto ? {
+                unbreakable: true,
+                margin: [0, 16, 0, 0],
+                stack: [
+                    smallLabel('Empfangsnachweis'),
+                    { text: `Foto der Sendung${inv.receiptPhoto.addedAt ? `, hinzugefügt am ${inv.receiptPhoto.addedAt}` : ''} (Original als Anhang im PDF)`, fontSize: 8, color: muted, margin: [0, 0, 0, 4] },
+                    { image: inv.receiptPhoto.dataUrl, fit: [mm(90), mm(90)] }
+                ]
+            } : null
         ].filter(Boolean);
         return documentShell({
             title: `${inv.brand}-${documentLabel} ${o.orderId || ''}`,

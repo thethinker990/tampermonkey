@@ -1,11 +1,11 @@
 /**
  * PdfSharedTheme – Nachrichten-Stylesheet: Chat-Meta, Bubbles, Preisvorschläge, Systemnachrichten, Chat-PDF.
- * Version: 4.5.0
+ * Version: 4.7.1
  *
  * buildExportDocument setzt Nachrichtenverlauf + Artikelseite zusammen; setzt pdf-style-core.js und pdf-style-article.js voraus.
  *
  * Einbindung (Reihenfolge: core, article, chat, invoice; Versions-Parameter erzwingt Neuladen aus dem Tampermonkey-Cache):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-chat.js?v=4.5.0
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/pdf-style-chat.js?v=4.7.1
  */
 (function (global) {
     'use strict';

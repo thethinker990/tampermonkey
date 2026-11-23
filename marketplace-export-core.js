@@ -1,19 +1,19 @@
 /**
  * MarketplaceExportCore – gemeinsame Ablauf-Bibliothek für alle Marktplatz-PDF-Exporter.
- * Version: 4.5.0
+ * Version: 4.7.1
  *
  * Verantwortung: Export-Pipeline, IndexedDB (Overrides je Konversation), Einstellungs-/Feld-Popup,
  * Toasts, HTTP/Bilder, Übersetzung (DeepL -> lokales LLM), Ollama-Client, PDF-Auslieferung.
  * Darstellung macht PdfSharedTheme (pdf-style-*.js), Seiten-Auslesen der jeweilige Adapter.
  *
  * Einbindung (Reihenfolge: pdfmake, vfs_fonts, pdf-lib, [xlsx], pdf-style-core, -article, -chat, [-invoice], Core):
- * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/marketplace-export-core.js?v=4.5.0
+ * // @require https://raw.githubusercontent.com/thethinker990/tampermonkey/main/marketplace-export-core.js?v=4.7.1
  * Benötigte Grants im Userscript: GM_xmlhttpRequest, GM_getValue, GM_setValue, GM_listValues
  */
 (function (global) {
     'use strict';
 
-    const VERSION = '4.5.0';
+    const VERSION = '4.7.1';
     const DB_NAME = 'MarketplacePdfExport';
     const DB_VERSION = 3;
     const UI_PREFIX = 'mpe';
@@ -349,11 +349,23 @@
         });
     }
 
-    /** Beliebiges Bild -> echtes JPEG (pdfmake/pdf-lib-sicher) inkl. Bytes für den PDF-Anhang. */
+    /**
+     * Beliebiges Bild -> pdfmake/pdf-lib-sicheres JPEG oder PNG inkl. Bytes für den PDF-Anhang.
+     * JPEG/PNG werden unverändert übernommen: Firefox' Fingerprinting-Schutz kann das Auslesen eines Canvas blockieren
+     * (Ergebnis wäre ein schwarzes Bild, Rückmeldung 19.11.2026). Nur andere Formate (WebP, AVIF …) laufen über den Canvas.
+     */
     async function toJpeg(dataUrl, quality = 0.92) {
         const img = await loadImage(dataUrl);
         const width = img.naturalWidth || img.width || 800;
         const height = img.naturalHeight || img.height || 600;
+        const bytes = dataUrlToBytes(dataUrl);
+        const isJpeg = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+        const isPng = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+        if (isJpeg || isPng) {
+            const mime = isJpeg ? 'image/jpeg' : 'image/png';
+            const clean = `data:${mime};base64,${String(dataUrl).split(',')[1] || ''}`;
+            return { dataUrl: clean, bytes, width, height, mimeType: mime };
+        }
         const canvas = document.createElement('canvas');
         canvas.width = width;
         canvas.height = height;
@@ -362,7 +374,7 @@
         ctx.fillRect(0, 0, width, height);
         ctx.drawImage(img, 0, 0, width, height);
         const jpeg = canvas.toDataURL('image/jpeg', quality);
-        return { dataUrl: jpeg, bytes: dataUrlToBytes(jpeg), width, height };
+        return { dataUrl: jpeg, bytes: dataUrlToBytes(jpeg), width, height, mimeType: 'image/jpeg' };
     }
 
     /** Lädt ein Bild (data:, same-origin oder per GM) und liefert {url, filename, dataUrl, bytes, width, height} oder null. */
@@ -373,12 +385,15 @@
             if (/^data:/i.test(url)) {
                 dataUrl = url;
             } else {
-                const res = await gmRequest({ url, responseType: 'blob', headers: { Accept: 'image/avif,image/webp,image/jpeg,image/png,image/*;q=0.8' } });
+                // eBay-CDN liefert dieselbe Bildnummer auch als JPEG -> kein Umweg über den Canvas nötig
+                const src = /ebayimg\.com/i.test(url) ? url.replace(/\.(webp|avif)(?=$|\?)/i, '.jpg') : url;
+                const res = await gmRequest({ url: src, responseType: 'blob', headers: { Accept: 'image/jpeg,image/png;q=0.9,image/*;q=0.5' } });
                 if (!(res.status >= 200 && res.status < 400) || !res.response) throw new Error(`HTTP ${res.status}`);
                 dataUrl = await blobToDataUrl(res.response);
             }
             const jpeg = await toJpeg(dataUrl);
-            return { url, filename: filename || 'bild.jpg', ...jpeg };
+            const name = filename || 'bild.jpg';
+            return { url, filename: jpeg.mimeType === 'image/png' ? name.replace(/\.jpe?g$/i, '.png') : name, ...jpeg };
         } catch (err) {
             console.warn('[MPE] Bild konnte nicht geladen werden:', url, err);
             return null;
@@ -1252,6 +1267,7 @@
             modal.className = `${UI_PREFIX}-modal`;
             modal.innerHTML = `<h3>${escapeHtml(title)}</h3>${hint ? `<p class="${UI_PREFIX}-hint">${escapeHtml(hint)}</p>` : ''}`;
             const inputs = new Map();
+            const setters = new Map();
             const wraps = new Map();
 
             for (const sec of sections) {
@@ -1272,6 +1288,47 @@
                         grid.appendChild(lab);
                         inputs.set(f.key, () => cb.checked);
                         wraps.set(f.key, lab);
+                        continue;
+                    }
+                    if (f.type === 'image') {
+                        // Foto (JPEG/PNG, unverändert gespeichert); f.onPick(photo, {set, status}) z. B. für die Texterkennung
+                        const box = document.createElement('div');
+                        box.className = `${UI_PREFIX}-field ${UI_PREFIX}-field--wide`;
+                        box.appendChild(document.createTextNode(f.label));
+                        let current = f.value || null;
+                        const preview = document.createElement('img');
+                        preview.style.cssText = 'max-width:160px;max-height:120px;border:1px solid #d1d5db;border-radius:4px;margin-top:4px';
+                        const status = document.createElement('span');
+                        status.className = `${UI_PREFIX}-hint`;
+                        const file = document.createElement('input');
+                        file.type = 'file';
+                        file.accept = 'image/jpeg,image/png';
+                        file.setAttribute('aria-label', f.label);
+                        const remove = document.createElement('button');
+                        remove.type = 'button';
+                        remove.className = `${UI_PREFIX}-btn ${UI_PREFIX}-btn--ghost`;
+                        remove.textContent = '✕ Foto entfernen';
+                        const show = () => {
+                            preview.hidden = !current;
+                            remove.hidden = !current;
+                            if (current) preview.src = current.dataUrl;
+                        };
+                        file.addEventListener('change', async () => {
+                            const picked = file.files && file.files[0];
+                            if (!picked) return;
+                            if (!/^image\/(jpeg|png)$/.test(picked.type)) { status.textContent = 'Bitte ein JPEG- oder PNG-Foto wählen.'; return; }
+                            if (picked.size > 12 * 1024 * 1024) { status.textContent = 'Foto ist größer als 12 MB – bitte verkleinern.'; return; }
+                            current = { dataUrl: await blobToDataUrl(picked), filename: picked.name, mimeType: picked.type, addedAt: new Date().toISOString() };
+                            show();
+                            status.textContent = '';
+                            if (f.onPick) await f.onPick(current, { set: (key, v) => setters.get(key)?.(v), status: (t) => { status.textContent = t; } });
+                        });
+                        remove.addEventListener('click', () => { current = null; file.value = ''; status.textContent = ''; show(); });
+                        show();
+                        box.append(file, preview, remove, status);
+                        grid.appendChild(box);
+                        inputs.set(f.key, () => current);
+                        wraps.set(f.key, box);
                         continue;
                     }
                     const wrap = document.createElement('label');
@@ -1314,6 +1371,7 @@
                     wrap.appendChild(input);
                     grid.appendChild(wrap);
                     inputs.set(f.key, () => input.value.trim());
+                    setters.set(f.key, (v) => { input.value = v; wrap.classList.add(`${UI_PREFIX}-field--changed`); });
                 }
                 box.appendChild(grid);
                 modal.appendChild(box);
@@ -1397,6 +1455,121 @@
         }
     }
 
+    /** Absender aus der KI-Antwort; die eigene Anschrift (Empfänger auf dem Etikett) wird verworfen. */
+    function senderFromLlm(data, ownName = '') {
+        const name = cleanText(data && data.name);
+        const address = (Array.isArray(data && data.address) ? data.address : String((data && data.address) || '').split(/\r?\n|,\s*(?=\d{4,5}\s)/)).map(cleanText).filter(Boolean);
+        const own = cleanText(ownName).toLowerCase();
+        if (!name && !address.length) return null;
+        if (own && name.toLowerCase() === own) return null;
+        return { name, address };
+    }
+
+    /** Ollama-Basisadresse aus der Generate-URL (…/api/generate → …). */
+    const ollamaBase = (settings) => String(settings.ollamaUrl || '').replace(/\/api\/.*$/, '').replace(/\/+$/, '');
+    const modelChecks = new Map();
+
+    /**
+     * Ist das Ollama-Modell installiert? GET /api/tags; Erfolg wird je Seite gemerkt, Fehler nicht (nach „ollama pull“ greift der nächste Versuch).
+     * Rückgabe { ok } | { ok:false, error } mit konkretem Hinweis (Befehl zum Installieren).
+     */
+    async function ollamaModelStatus(settings, model) {
+        const base = ollamaBase(settings);
+        const key = `${base}|${model}`;
+        if (modelChecks.has(key)) return modelChecks.get(key);
+        let status;
+        try {
+            const res = await gmRequest({ method: 'GET', url: `${base}/api/tags`, timeout: 5000 });
+            if (res.status !== 200) {
+                status = { ok: false, error: `Ollama antwortet nicht (HTTP ${res.status}, ${base}) – läuft Ollama?` };
+            } else {
+                const names = (JSON.parse(res.text).models || []).map((m) => String(m.name || m.model || ''));
+                const want = model.includes(':') ? model : `${model}:latest`;
+                status = names.includes(want) ? { ok: true } : { ok: false, error: `Ollama-Modell „${model}“ ist nicht installiert – im Terminal ausführen: ollama pull ${model}` };
+            }
+        } catch (err) {
+            status = { ok: false, error: `Ollama nicht erreichbar (${base}): ${err.message || err} – läuft Ollama?` };
+        }
+        if (status.ok) modelChecks.set(key, status);
+        return status;
+    }
+
+    /** Alle eingestellten Ollama-Modelle prüfen (nach dem Speichern der Einstellungen). Rückgabe: Fehlertexte. */
+    async function checkOllamaModels(settings) {
+        if (!settings.useLlm) return [];
+        const models = [...new Set([settings.ollamaModel, settings.ollamaVisionModel].map((m) => String(m || '').trim()).filter(Boolean))];
+        const errors = [];
+        for (const m of models) {
+            const s = await ollamaModelStatus(settings, m);
+            if (!s.ok && !errors.includes(s.error)) errors.push(s.error);
+        }
+        return errors;
+    }
+
+    /** Bildmodell nutzbar? { ok } | { ok:false, error } – ohne eingestelltes Modell bzw. ohne KI kein Fehlertext. */
+    async function visionModelStatus(settings) {
+        if (!settings.useLlm || !settings.ollamaVisionModel) return { ok: false, error: '' };
+        return ollamaModelStatus(settings, settings.ollamaVisionModel);
+    }
+
+    /*
+     * Texterkennung (Tesseract.js, per @require in beiden Userscripts): EIN Worker je Seite für alle Aufrufer
+     * (Sendungsnummern in Chatbildern, Absender auf Paketfotos); nach 60 s ohne Nutzung wieder beendet.
+     */
+    let ocrWorker = null;
+    let ocrIdleTimer = null;
+    async function recognizeText(dataUrl) {
+        if (!global.Tesseract) throw new Error('Tesseract.js nicht geladen (@require im Userscript fehlt)');
+        clearTimeout(ocrIdleTimer);
+        if (!ocrWorker) ocrWorker = global.Tesseract.createWorker('deu+eng');
+        let worker;
+        try {
+            worker = await ocrWorker;
+        } catch (err) {
+            ocrWorker = null;
+            throw err;
+        }
+        try {
+            const { data } = await worker.recognize(dataUrl);
+            return String(data.text || '');
+        } finally {
+            ocrIdleTimer = setTimeout(() => {
+                const w = ocrWorker;
+                ocrWorker = null;
+                if (w) w.then((x) => x.terminate()).catch(() => {});
+            }, 60000);
+        }
+    }
+
+    /**
+     * Foto von Paket/Brief: Absender auslesen. Ollama-Bildmodell, sonst Texterkennung + Text-KI.
+     * Rückgabe { name, address[], engine, warning? } | { text, engine, warning? } (nur erkannter Text) | { error }.
+     */
+    async function readSenderFromPhoto(settings, dataUrl) {
+        const prompt = 'Das Foto zeigt ein Paket- oder Briefetikett. Lies den ABSENDER (Verkäufer) ab, NICHT den Empfänger' +
+            (settings.ownFullName ? ` („${settings.ownFullName}“)` : '') +
+            '. Antworte NUR als JSON {"name":"Vorname Nachname oder Firma","address":["Straße Hausnummer","PLZ Ort","Land (nur wenn angegeben)"]}. Kein Absender lesbar: {"name":"","address":[]}. Nichts erfinden.';
+        const vision = await visionModelStatus(settings);
+        let warning = vision.error || '';
+        if (vision.ok) {
+            const r = await ollamaGenerate(settings, prompt, { json: true, timeoutMs: 120000, images: [dataUrl.replace(/^data:[^,]+,/, '')], model: settings.ollamaVisionModel });
+            if (r.ok) return { ...(senderFromLlm(r.data, settings.ownFullName) || { name: '', address: [] }), engine: `Ollama ${settings.ollamaVisionModel}` };
+            warning = r.error;
+        }
+        let text;
+        try {
+            text = (await recognizeText(dataUrl)).trim();
+        } catch (err) {
+            return { error: [warning, `Texterkennung nicht möglich: ${err.message || err}`, 'Bitte Absender abtippen; das Foto bleibt als Empfangsnachweis gespeichert.'].filter(Boolean).join(' · ') };
+        }
+        if (settings.useLlm && text) {
+            const r = await ollamaGenerate(settings, `${prompt}\n\nErkannter Text des Etiketts:\n${text}`, { json: true, timeoutMs: 60000 });
+            if (r.ok) return { ...(senderFromLlm(r.data, settings.ownFullName) || { name: '', address: [] }), engine: 'Tesseract.js + Ollama', warning };
+            warning = [warning, r.error].filter(Boolean).join(' · ');
+        }
+        return { text, engine: 'Tesseract.js', warning };
+    }
+
     const TRACKING_HINT_RE = /Sendungsn|Sendungsverfolgung|Tracking|Paketnummer|Einlieferung|Beleg|Quittung|Paketschein|Etikett|Label|verschickt|abgegeben|zur Post/i;
 
     /**
@@ -1415,8 +1588,8 @@
             if (near) targets.push(...m.images.filter((img) => img.dataUrl).map((img) => ({ img, msg: m })));
         });
         if (!targets.length) return { found, warnings };
-        let visionOk = Boolean(settings.useLlm && settings.ollamaVisionModel);
-        let tesseract = null;
+        let visionOk = null; // erst prüfen, wenn ein Bild wirklich erkannt werden muss
+        let ocrOk = Boolean(global.Tesseract);
         const prompt = 'Lies alle Sendungsnummern/Tracking-Nummern (Paketnummern von DHL, Deutsche Post, Hermes, DPD, GLS, UPS) auf diesem Bild ab. ' +
             'Antworte NUR als JSON {"trackingIds": ["..."], "carrier": "DHL|Deutsche Post|Hermes|DPD|GLS|UPS|"}. Keine Nummer erkennbar: {"trackingIds": []}. Nichts erfinden.';
         let cachedAll = true;
@@ -1428,6 +1601,11 @@
             if (!ids) {
                 cachedAll = false;
                 let engine = '';
+                if (visionOk === null) {
+                    const v = await visionModelStatus(settings);
+                    visionOk = v.ok;
+                    if (v.error) warnings.push(`Bildmodell nicht nutzbar: ${v.error} – Sendungsnummern werden per Texterkennung gesucht`);
+                }
                 if (visionOk) {
                     const r = await ollamaGenerate(settings, prompt, { json: true, timeoutMs: 120000, images: [img.dataUrl.replace(/^data:[^,]+,/, '')], model: settings.ollamaVisionModel });
                     if (r.ok) {
@@ -1438,13 +1616,12 @@
                         warnings.push(`Bild-Erkennung per Ollama-Vision nicht möglich (${r.error}) – Fallback Texterkennung`);
                     }
                 }
-                if (!visionOk && global.Tesseract) {
+                if (!visionOk && ocrOk) {
                     try {
-                        tesseract = tesseract || (await global.Tesseract.createWorker('deu+eng'));
-                        const { data } = await tesseract.recognize(img.dataUrl);
-                        ids = findTrackingNumbers([data.text], { bare: true }).map((t) => t.id);
+                        ids = findTrackingNumbers([await recognizeText(img.dataUrl)], { bare: true }).map((t) => t.id);
                         engine = 'Tesseract.js';
                     } catch (err) {
+                        ocrOk = false;
                         warnings.push(`Texterkennung (Tesseract.js) fehlgeschlagen: ${err.message || err}`);
                         break;
                     }
@@ -1453,8 +1630,7 @@
             }
             for (const id of ids || []) if (!found.some((f) => f.id === id)) found.push({ id, carrier: detectCarrier(id), source: img.filename, message: msg });
         }
-        if (tesseract) await tesseract.terminate().catch(() => {});
-        if (!cachedAll && !visionOk && !global.Tesseract) warnings.push('Sendungsnummern in Bildern nicht geprüft (weder Ollama-Vision noch Tesseract.js verfügbar)');
+        if (!cachedAll && !visionOk && !global.Tesseract) warnings.push('Sendungsnummern in Bildern nicht geprüft (weder Ollama-Bildmodell noch Tesseract.js verfügbar)');
         return { found, warnings };
     }
 
@@ -1671,8 +1847,11 @@
     function computeOrderAmounts(order) {
         const ov = order.overrides || {};
         const pick = (k, base) => (ov[k] !== undefined && ov[k] !== null ? ov[k] : base);
-        const paid = order.paid || {};
-        const fees = order.fees || {};
+        // Unbezahlt abgebrochen: steht mit 0 EUR im Bericht (vollständig wie eBays Meldung ans Finanzamt)
+        const voided = order.cancelled && !order.paidDate;
+        const paid = voided ? {} : order.paid || {};
+        const fees = voided ? {} : order.fees || {};
+        if (voided) order = { ...order, items: [], shippingActual: null };
         const itemsTotal = pick('itemsTotal', (order.items || []).reduce((s, i) => s + (i.total || 0), 0) || paid.subtotal || 0);
         const shippingCharged = pick('shippingCharged', paid.shipping || 0);
         const refund = pick('refund', paid.refund || 0);
@@ -1683,14 +1862,26 @@
         return { itemsTotal, shippingCharged, subtotal, refund, shippingActual, transactionFee, adFee, total: subtotal - refund - (shippingActual || 0) - transactionFee - adFee };
     }
 
-    /** Käufe: Erstattungen getrennt vom ursprünglichen Gesamtbetrag ausweisen. */
+    /**
+     * Käufe: Artikelpreis + Versandkosten + Gebühren − Erstattung = Gesamtbetrag (immer berechnet).
+     * Ohne bekannte Versandkosten gilt die Differenz zum bezahlten Betrag als Versand (negativ = Rabatt unter Gebühren).
+     */
     function computePurchaseAmounts(order) {
         const ov = order.overrides || {};
-        const itemsTotal = ov.itemsTotal ?? (order.items || []).reduce((s, i) => s + (i.total || 0), 0);
-        const grossTotal = ov.total ?? order.paid?.total ?? itemsTotal;
-        const refund = order.purchaseEdits?.fullRefund ? grossTotal : (ov.refund ?? order.paid?.refund ?? 0);
-        const total = grossTotal - refund;
-        return { itemsTotal, grossTotal, refund, total, fees: grossTotal - itemsTotal };
+        const paid = order.paid || {};
+        const itemsTotal = ov.itemsTotal ?? ((order.items || []).reduce((s, i) => s + (i.total || 0), 0) || paid.subtotal || 0);
+        const knownGross = ov.total ?? paid.total;
+        let shipping = ov.shipping ?? paid.shipping;
+        let fees = ov.fees ?? paid.fees;
+        if (shipping === undefined || shipping === null) {
+            const diff = knownGross === undefined || knownGross === null ? 0 : knownGross - itemsTotal - (fees || 0);
+            shipping = diff > 0 ? diff : 0;
+            if (diff < 0 && (fees === undefined || fees === null)) fees = diff;
+        }
+        if (fees === undefined || fees === null) fees = knownGross === undefined || knownGross === null ? 0 : knownGross - itemsTotal - shipping;
+        const grossTotal = itemsTotal + shipping + fees;
+        const refund = order.purchaseEdits?.fullRefund ? grossTotal : (ov.refund ?? paid.refund ?? 0);
+        return { itemsTotal, shipping, fees, grossTotal, refund, total: grossTotal - refund };
     }
 
     const dateDe = (iso) => (iso ? iso.split('-').reverse().join('.') : '');
@@ -1711,7 +1902,7 @@
         ['transactionFee', 'Transaktionsgebühren'],
         ['adFee', 'Anzeigengebühren']
     ];
-    const PURCHASE_FIELDS = [['itemsTotal', 'Artikelpreis'], ['total', 'Gesamtbetrag vor Erstattung'], ['refund', 'Erstattungsbetrag']];
+    const PURCHASE_FIELDS = [['itemsTotal', 'Artikelpreis'], ['shipping', 'Versandkosten'], ['fees', 'Gebühren (z. B. Käuferschutz; Rabatt negativ)'], ['refund', 'Erstattung']];
     const ACQUISITION_FIELDS = [
         { key: 'acquiredAt', label: 'Erworben am (TT.MM.JJJJ)', type: 'date' },
         { key: 'acquiredFrom', label: 'Erworben von', type: 'select', options: [['', '–'], ['Privatkauf', 'Privatkauf'], ['Gewerblicher Kauf', 'Gewerblicher Kauf']] },
@@ -1720,13 +1911,11 @@
         { key: 'saleReason', label: 'Verkaufsgrund', wide: true }
     ];
 
-    /** Aktuelle Werte einer Bestellung als Formularwerte (EUR-Text, TT.MM.JJJJ); Käufe nur Artikelpreis/Gesamtbetrag. */
+    /** Aktuelle Werte einer Bestellung als Formularwerte (EUR-Text, TT.MM.JJJJ); Käufe: Artikelpreis, Versand, Gebühren, Erstattung. */
     function orderEditValues(order) {
         if (order.role === 'BUYER') {
-            const p = computePurchaseAmounts(order);
-            return Object.fromEntries(PURCHASE_FIELDS.map(([k]) => [k, eurInput(
-                k === 'total' ? p.grossTotal : k === 'refund' ? (order.overrides?.refund ?? order.paid?.refund ?? 0) : p[k]
-            )]));
+            const p = computePurchaseAmounts({ ...order, purchaseEdits: { ...(order.purchaseEdits || {}), fullRefund: false } });
+            return Object.fromEntries(PURCHASE_FIELDS.map(([k]) => [k, eurInput(p[k])]));
         }
         const cur = computeOrderAmounts(order);
         const acq = order.acquisition || {};
@@ -1743,12 +1932,24 @@
     /** Formularwerte zurückschreiben: abweichende Beträge als manuelle Werte (Versandkosten als manueller Tarif), Erwerbsangaben. */
     function applyOrderEdits(order, values) {
         const buyer = order.role === 'BUYER';
-        const auto = buyer ? computePurchaseAmounts({ ...order, overrides: {} }) : computeOrderAmounts({ ...order, overrides: {} });
+        const auto = buyer
+            ? computePurchaseAmounts({ ...order, overrides: {}, purchaseEdits: { ...(order.purchaseEdits || {}), fullRefund: false } })
+            : computeOrderAmounts({ ...order, overrides: {} });
         const next = { ...order, overrides: {} };
-        for (const [k] of buyer ? PURCHASE_FIELDS : AMOUNT_FIELDS) {
+        if (buyer) {
+            // Alle vier Beträge gemeinsam festhalten, sobald einer abweicht – sonst würde die Differenz still in „Gebühren“ landen
+            const entered = {};
+            for (const [k, label] of PURCHASE_FIELDS) {
+                const raw = values[k];
+                const v = toCents(raw, k !== 'fees');
+                if (raw !== undefined && String(raw).trim() !== '' && v === null) throw new Error(`${label.replace(/ \(.*$/, '')} ist ungültig.`);
+                entered[k] = v === null ? auto[k] : v;
+            }
+            if (PURCHASE_FIELDS.some(([k]) => entered[k] !== auto[k])) Object.assign(next.overrides, entered);
+        }
+        for (const [k] of buyer ? [] : AMOUNT_FIELDS) {
             const v = toCents(values[k], true);
-            if (buyer && k === 'refund' && values[k] && v === null) throw new Error('Der Erstattungsbetrag ist ungültig.');
-            const original = buyer && k === 'total' ? auto.grossTotal : buyer && k === 'refund' ? (order.paid?.refund ?? 0) : auto[k];
+            const original = auto[k];
             if (v !== null && v !== original) next.overrides[k] = v;
         }
         if (next.overrides.shippingActual !== undefined) {
@@ -1774,9 +1975,11 @@
                 paidDate: paidDate !== (order.paidDate || '') ? paidDate : '',
                 shippingService: values.shippingService !== (order.shippingService || '') ? values.shippingService : '',
                 shippingCarrier: values.shippingCarrier !== (order.shippingCarrier || '') ? values.shippingCarrier : '',
+                trackingId: values.trackingId !== undefined && values.trackingId !== (order.trackingId || '') ? values.trackingId : '',
                 itemTitles,
                 fullRefund: Boolean(values.fullRefund)
             };
+            if (Object.prototype.hasOwnProperty.call(values, 'receiptPhoto')) next.receiptPhoto = values.receiptPhoto || null;
         }
         if (buyer) {
             const amounts = computePurchaseAmounts({ ...next, purchaseEdits: { ...next.purchaseEdits, fullRefund: false } });
@@ -1799,7 +2002,7 @@
             if (delivered !== undefined) manualDates.deliveredDate = delivered && delivered !== order.deliveredDate ? delivered : '';
             next.manualDates = manualDates;
         }
-        const manual = (o) => JSON.stringify([o.overrides || {}, o.purchaseEdits || null, o.acquisition || null, o.manualDates || null, o.shippingActual?.source === 'manual' ? o.shippingActual : null]);
+        const manual = (o) => JSON.stringify([o.overrides || {}, o.purchaseEdits || null, o.acquisition || null, o.manualDates || null, o.shippingActual?.source === 'manual' ? o.shippingActual : null, o.receiptPhoto?.addedAt || null]);
         if (manual(next) !== manual(order)) next.editedAt = new Date().toISOString();
         return next;
     }
@@ -1828,6 +2031,7 @@
             paidDate: edits.paidDate || order.paidDate,
             shippingService: edits.shippingService || order.shippingService,
             shippingCarrier: edits.shippingCarrier || order.shippingCarrier,
+            trackingId: edits.trackingId || order.trackingId,
             items: (order.items || []).map((item, index) => ({
                 ...item,
                 title: edits.itemTitles?.[item.itemId || String(index)] || item.title
@@ -2174,7 +2378,7 @@
     }
 
     /** Popup: Beträge und Erwerbsangaben einer Bestellung korrigieren (Overrides) inkl. Auswahl des Versandtarifs. */
-    async function openOrderEditor(order, reason = '') {
+    async function openOrderEditor(order, reason = '', { settings = null } = {}) {
         const purchase = order.role === 'BUYER';
         const effective = effectivePurchaseOrder(order);
         const carriers = await getShippingRates();
@@ -2200,9 +2404,31 @@
                     fields: [
                         { key: 'sellerName', label: 'Verkäufername (Klarname)', value: effective.seller?.name || '' },
                         { key: 'sellerAddress', label: 'Anschrift des Verkäufers', type: 'textarea', value: (effective.seller?.address || []).join('\n') },
+                        {
+                            key: 'receiptPhoto',
+                            label: '📷 Foto von Paket/Brief (Empfangsnachweis im Kaufbeleg; Absender wird ausgelesen)',
+                            type: 'image',
+                            value: order.receiptPhoto || null,
+                            onPick: async (photo, ui) => {
+                                if (!settings) return;
+                                ui.status('🔎 Absender wird ausgelesen …');
+                                const r = await readSenderFromPhoto(settings, photo.dataUrl);
+                                const note = r.warning ? ` ⚠️ ${r.warning}` : '';
+                                if (r.name || (r.address && r.address.length)) {
+                                    if (r.name) ui.set('sellerName', r.name);
+                                    if (r.address && r.address.length) ui.set('sellerAddress', r.address.join('\n'));
+                                    ui.status(`✅ Absender übernommen (${r.engine}) – bitte prüfen.${note}`);
+                                } else if (r.text) {
+                                    ui.status(`Kein Absender sicher erkannt (${r.engine}). Erkannter Text: ${r.text.replace(/\s+/g, ' ').slice(0, 300)}${note}`);
+                                } else {
+                                    ui.status(r.error || `Kein Absender erkannt (${r.engine}) – bitte abtippen.${note}`);
+                                }
+                            }
+                        },
                         { key: 'paidDate', label: 'Bezahlt am (TT.MM.JJJJ)', value: dateDe(effective.paidDate) },
                         { key: 'shippingService', label: 'Versandservice', value: effective.shippingService || '' },
                         { key: 'shippingCarrier', label: 'Versanddienstleister', value: effective.shippingCarrier || '' },
+                        { key: 'trackingId', label: 'Sendungsnummer', value: effective.trackingId || '' },
                         ...(effective.items || []).map((item, index) => ({ key: `itemTitle${index}`, label: `Artikelname ${index + 1}`, value: item.title || '', wide: true })),
                         { key: 'fullRefund', label: 'Vollständig erstattet / Rückgabe (Gesamtbetrag 0 EUR)', type: 'checkbox', value: order.purchaseEdits?.fullRefund }
                     ]
@@ -2310,6 +2536,7 @@
             },
             items: (order.items || []).map((i) => ({ ...i, itemUrl: ctx.itemUrl ? ctx.itemUrl(i.itemId) : '' })),
             amounts: a,
+            receiptPhoto: purchase && order.receiptPhoto && order.receiptPhoto.dataUrl ? { dataUrl: order.receiptPhoto.dataUrl, addedAt: dateDe(String(order.receiptPhoto.addedAt || '').slice(0, 10)) } : null,
             transactionFeeLabel: order.platform === 'kleinanzeigen' && /^paypal$/i.test(String(order.paymentMethod || '')) ? 'PayPal-Gebühr (Käuferschutz)' : '',
             shippingActualLabel: sa && sa.product ? [sa.carrier, sa.product].filter(Boolean).join(' ') : ''
         };
@@ -2382,7 +2609,9 @@
         return Object.entries(value).some(([key, child]) => isSecretKey(key) || containsSecretKey(child));
     }
 
-    const BACKUP_STORES = ['records', 'orders', 'config', 'articles', 'media', 'syncOutbox', 'unmappedFields'];
+    // cache seit 4.7.1 (gesicherte Anzeigen, Bewertungsbitten, Profile); ältere Sicherungen haben ihn nicht
+    const BACKUP_STORES = ['records', 'orders', 'config', 'articles', 'media', 'syncOutbox', 'unmappedFields', 'cache'];
+    const BACKUP_KEY_FIELDS = { records: 'key', orders: 'orderId', config: 'key', articles: 'articleId', media: 'mediaId', syncOutbox: 'operationId', unmappedFields: 'id', cache: 'key' };
     const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
     async function validateBackup(backup) {
@@ -2404,10 +2633,10 @@
         if (backup.settings !== undefined && (!backup.settings || typeof backup.settings !== 'object' || Array.isArray(backup.settings))) {
             throw new Error('Sicherung enthält ungültige Einstellungen');
         }
+        const stores = { cache: [], ...backup.stores };
         for (const name of BACKUP_STORES) {
-            if (!Array.isArray(backup.stores[name])) throw new Error(`Sicherung enthält keine gültige Liste für ${name}`);
+            if (!Array.isArray(stores[name])) throw new Error(`Sicherung enthält keine gültige Liste für ${name}`);
         }
-        const stores = { ...backup.stores };
         const articleIds = new Set();
         for (const article of stores.articles) {
             if (!article || !UUID_RE.test(article.articleId || '') || !article.data || typeof article.data !== 'object' || Array.isArray(article.data)
@@ -2432,7 +2661,7 @@
             restoredMedia.push({ ...metadata, blob });
         }
         stores.media = restoredMedia;
-        const keyFields = { records: 'key', orders: 'orderId', config: 'key', articles: 'articleId', media: 'mediaId', syncOutbox: 'operationId', unmappedFields: 'id' };
+        const keyFields = BACKUP_KEY_FIELDS;
         for (const name of BACKUP_STORES) {
             const seen = new Set();
             for (const row of stores[name]) {
@@ -2463,7 +2692,7 @@
         { key: 'deeplKey', label: 'DeepL-API-Key', type: 'password' },
         { key: 'ollamaUrl', label: 'Ollama-Endpunkt' },
         { key: 'ollamaModel', label: 'Ollama-Modell' },
-        { key: 'ollamaVisionModel', label: 'Ollama-Vision-Modell für Sendungsnummern in Bildern (leer = nur Tesseract.js)' },
+        { key: 'ollamaVisionModel', label: 'Ollama-Bildmodell für Sendungsnummern in Chatbildern und Absender auf Paketfotos (leer = nur Tesseract.js, nur Kleinanzeigen)' },
         { key: 'deliveryMode', label: 'Nach dem Erstellen', type: 'select', options: [['download', 'Nur herunterladen'], ['open', 'Nur im Tab öffnen'], ['both', 'Herunterladen und öffnen']] },
         { key: 'invoiceSaveAs', label: 'Rechnungen/Kaufbelege: „Speichern unter“ fragen (nur diese Dateien; Tampermonkey: Download-Modus „Browser-API“, .pdf in der Whitelist)', type: 'checkbox' },
         { key: 'useLlm', label: 'Lokales LLM (Ollama) als Fallback/Analyse nutzen', type: 'checkbox' },
@@ -2563,6 +2792,10 @@
             const nextSettings = { ...settings };
             for (const f of globalFieldDefs) if (answer.values[f.key] !== undefined) nextSettings[f.key] = answer.values[f.key];
             store.set(nextSettings);
+            // Eingestellte KI-Modelle installiert? Sonst konkreter Hinweis (z. B. „ollama pull qwen3-vl:8b“)
+            void checkOllamaModels(nextSettings).then((errors) => {
+                if (errors.length) toast('⚠️ Lokale KI (Ollama) nicht vollständig nutzbar', { type: 'warn', sticky: true, list: errors });
+            });
 
             if (!merged) return { action: answer.button };
             const overrides = {};
@@ -2651,8 +2884,8 @@
                 let bytes = await renderPdfBytes(Theme.buildExportDocument(model));
                 if (settings.attachOriginals) {
                     const attachments = [
-                        ...model.chatImages.map((i) => ({ bytes: i.bytes, filename: i.filename, description: 'Originalbild aus dem Chat' })),
-                        ...model.adImages.map((i) => ({ bytes: i.bytes, filename: i.filename, description: 'Originalbild der Anzeige' }))
+                        ...model.chatImages.map((i) => ({ bytes: i.bytes, filename: i.filename, mimeType: i.mimeType, description: 'Originalbild aus dem Chat' })),
+                        ...model.adImages.map((i) => ({ bytes: i.bytes, filename: i.filename, mimeType: i.mimeType, description: 'Originalbild der Anzeige' }))
                     ].filter((a) => a.bytes);
                     bytes = await attachFiles(bytes, attachments);
                 }
@@ -2813,8 +3046,8 @@
             document.body.appendChild(overlay);
         }
 
-        async function exportBackup() {
-            const storeNames = ['records', 'orders', 'config', 'articles', 'media', 'syncOutbox', 'unmappedFields'];
+        async function exportBackup({ reason = '' } = {}) {
+            const storeNames = BACKUP_STORES;
             const stores = {};
             for (const name of storeNames) {
                 stores[name] = await dbGetAllStrict(name);
@@ -2839,12 +3072,33 @@
                 format: 'marketplace-pdf-export-backup',
                 version: 1,
                 exportedAt: new Date().toISOString(),
+                scriptVersion: config.scriptVersion,
                 settings: stripSecrets(store.get()),
                 stores: stripSecrets(stores)
             };
-            const filename = `marketplace-export-backup-${new Date().toISOString().slice(0, 10)}.json`;
+            const filename = `${formatDateIso()} ${sanitizeFilename(brand)} Sicherung v${config.scriptVersion}.json`;
             deliverFile(new Blob([JSON.stringify(backup)], { type: 'application/json' }), filename, 'application/json');
-            toast('Sicherung erstellt; Zugangsdaten und API-Token wurden ausgelassen.', { type: 'success', timeoutMs: 5000 });
+            toast(`🗄️ Sicherung erstellt${reason ? ` (${reason})` : ''}: ${filename}. Zugangsdaten und API-Token wurden ausgelassen.`, { type: 'success', sticky: Boolean(reason), timeoutMs: 5000 });
+        }
+
+        /**
+         * Einmal je Versionswechsel automatisch eine Sicherungsdatei (Tampermonkey-Speicher ist je Skript gemeinsam → einmal je Version, nicht je Tab).
+         * Ohne bisherige Versionsmarke (vor 4.7.1 oder Erstinstallation) nur, wenn schon Daten vorhanden sind.
+         */
+        async function autoBackupOnUpdate() {
+            if (!hasGm() || window.top !== window.self) return;
+            const key = 'mpe:backup:lastVersion';
+            const last = GM_getValue(key, '');
+            if (last === config.scriptVersion) return;
+            const hasData = typeof GM_listValues === 'function' && GM_listValues().some((k) => /^mpe:(orders|records|articles):/.test(k));
+            GM_setValue(key, config.scriptVersion);
+            if (!hasData) return;
+            try {
+                await exportBackup({ reason: last ? `automatisch nach Update von v${last}` : 'automatisch nach Update' });
+            } catch (err) {
+                GM_setValue(key, last); // beim nächsten Seitenaufruf erneut versuchen
+                toast(`⚠️ Automatische Sicherung nach dem Update fehlgeschlagen: ${err.message || err} – bitte über 🗄️ manuell sichern.`, { type: 'error', sticky: true });
+            }
         }
 
         async function importBackup(file) {
@@ -2856,7 +3110,7 @@
             }
             const storeNames = BACKUP_STORES;
             const incomingStores = await validateBackup(backup);
-            const keyFields = { records: 'key', orders: 'orderId', config: 'key', articles: 'articleId', media: 'mediaId', syncOutbox: 'operationId', unmappedFields: 'id' };
+            const keyFields = BACKUP_KEY_FIELDS;
             const staged = [];
             const supersededSyncEntities = new Set();
             const existingOutbox = await dbGetAllStrict('syncOutbox');
@@ -2897,6 +3151,11 @@
                         continue;
                     }
                     if (JSON.stringify(existing) === JSON.stringify(incoming)) continue;
+                    // Zwischenspeicher: ohne Rückfrage den neueren Stand behalten
+                    if (name === 'cache') {
+                        if (String(incoming.updatedAt || '') > String(existing.updatedAt || '')) staged.push([name, incoming]);
+                        continue;
+                    }
                     let merged;
                     if (name === 'articles') {
                         const data = await openConflictPreview(existing.data || {}, incoming.data || {});
@@ -2994,7 +3253,7 @@
             title.textContent = 'Sicherung';
             const hint = document.createElement('p');
             hint.className = `${UI_PREFIX}-hint`;
-            hint.textContent = 'Export enthält Artikeldaten, Originalbilder, Bestellungen und Einstellungen. Zugangsdaten und API-Token werden ausgelassen.';
+            hint.textContent = 'Export enthält Artikeldaten, Originalbilder, Bestellungen (inkl. erstellter Rechnungen und manueller Werte), Chat-Exporte, gesicherte Anzeigen und Einstellungen. Zugangsdaten und API-Token werden ausgelassen. Nach jedem Update entsteht automatisch eine Sicherung.';
             const buttons = document.createElement('div');
             buttons.className = `${UI_PREFIX}-buttons`;
             const close = () => overlay.remove();
@@ -3078,7 +3337,10 @@
                 const model = buildOrderDocumentModel(order, docCtx());
                 const images = await Promise.all(model.items.map((i) => (i.imageUrl ? fetchImage(i.imageUrl, 'artikel.jpg') : null)));
                 model.items.forEach((it, n) => { it.imageDataUrl = images[n] ? images[n].dataUrl : ''; });
-                const bytes = await renderPdfBytes(Theme.buildInvoiceDocument(model));
+                let bytes = await renderPdfBytes(Theme.buildInvoiceDocument(model));
+                if (model.receiptPhoto && order.receiptPhoto) {
+                    bytes = await attachFiles(bytes, [{ bytes: dataUrlToBytes(order.receiptPhoto.dataUrl), filename: order.receiptPhoto.filename || 'empfangsnachweis.jpg', mimeType: order.receiptPhoto.mimeType, description: 'Foto der Sendung (Empfangsnachweis)' }]);
+                }
                 const effective = effectivePurchaseOrder(order);
                 const title = sanitizeFilename((effective.items && effective.items[0] && effective.items[0].title) || '', 160);
                 // Rechnungsdatum = Zahldatum (wie im Dokument)
@@ -3100,7 +3362,7 @@
                     ],
                     actions: [
                         { label: '📂 Im Tab öffnen', href: url },
-                        { label: '✏️ Werte ändern & neu erstellen', onClick: async () => { if (await openOrderEditor(order)) await createInvoice(order.orderId); } }
+                        { label: '✏️ Werte ändern & neu erstellen', onClick: async () => { if (await openOrderEditor(order, '', { settings: store.get() })) await createInvoice(order.orderId); } }
                     ]
                 });
             } catch (err) {
@@ -3128,7 +3390,7 @@
 
         async function editOrder(orderId) {
             const order = await loadOrder(orderId);
-            if (order && (await openOrderEditor(order))) toast('💾 Beträge gespeichert. Rechnung bei Bedarf neu erstellen.', { type: 'success', timeoutMs: 4000 });
+            if (order && (await openOrderEditor(order, '', { settings: store.get() }))) toast('💾 Beträge gespeichert. Rechnung bei Bedarf neu erstellen.', { type: 'success', timeoutMs: 4000 });
         }
 
         const itemLines = (o) => (o.items || []).flatMap((i) => [
@@ -3171,10 +3433,10 @@
                 }
                 const buyer = [o.buyer && o.buyer.name, o.buyer && o.buyer.username ? `(${o.buyer.username})` : ''].filter(Boolean).join(' ');
                 const hold = holdingPeriod(acq.date, o.soldDate);
-                rows.push([dateDe(o.soldDate), { text: o.orderId, url: o.orderUrl }, { lines: [...itemLines(o), { label: 'Käufer: ', text: buyer || 'n/a', muted: true }] },
+                rows.push([dateDe(o.soldDate), { text: o.orderId, url: o.orderUrl }, { lines: [...itemLines(o), { label: 'Käufer: ', text: buyer || 'n/a', muted: true }, ...(o.cancelled && !o.paidDate ? [{ label: 'Status: ', text: 'abgebrochen, nicht bezahlt (0 EUR)', muted: true }] : [])] },
                     a.subtotal, fees, a.total, hold, acq.reason || '', ...(withAcquisition ? [price ?? 'n/a', profit ?? 'n/a'] : [])]);
                 const c = (v) => (v || 0) / 100;
-                for (const { i, first, lineTotal } of xlsxItemLines(o, a.total)) {
+                for (const { i, first, lineTotal } of xlsxItemLines(o.cancelled && !o.paidDate ? { ...o, items: (o.items || []).map((x) => ({ ...x, unitPrice: 0, total: 0 })) } : o, a.total)) {
                     xlsx.push([xlsxDate(o.soldDate), o.orderId, i.itemId || '', i.title || '', buyer, i.quantity || 1, c(i.unitPrice), c(i.total),
                         first ? c(a.shippingCharged) : 0, first ? -c(a.refund) : 0, first ? -c(a.shippingActual) : 0, first ? -c(a.transactionFee) : 0, first ? -c(a.adFee) : 0,
                         c(lineTotal), o.shippingService || '', o.trackingId || '',
@@ -3221,7 +3483,7 @@
             for (const raw of orders) {
                 const o = effectivePurchaseOrder(raw);
                 const p = computePurchaseAmounts(o);
-                const fees = p.fees - p.refund;
+                const fees = p.total - p.itemsTotal;
                 t.items += p.itemsTotal;
                 t.fees += fees;
                 t.total += p.total;
@@ -3282,6 +3544,7 @@
             const sales = kind === 'sales';
             const name = sales ? 'Verkaufsbericht' : 'Kaufbericht';
             try {
+                // Unbezahlt abgebrochene Verkäufe sind kein Umsatz und erscheinen nicht im Bericht
                 const all = (await dbGetAll('orders')).filter((o) => o.platform === config.platform && (o.role === 'BUYER') !== sales);
                 const years = Array.from(new Set(all.map((o) => (o.soldDate || '').slice(0, 4)).filter(Boolean))).sort().reverse();
                 const thisYear = String(new Date().getFullYear());
@@ -3514,6 +3777,8 @@
             return bar;
         }
 
+        setTimeout(() => { void autoBackupOnUpdate(); }, 4000);
+
         const api = {
             settings: store,
             run,
@@ -3608,6 +3873,10 @@ ${signature}`;
         stripSecrets,
         containsSecretKey,
         validateBackup,
+        senderFromLlm,
+        ollamaModelStatus,
+        checkOllamaModels,
+        recognizeText,
         toast,
         detectCarrier,
         findTrackingNumber,
